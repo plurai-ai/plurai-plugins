@@ -333,29 +333,6 @@ def tool_start_judge(args):
     }
 
 
-def tool_create_thread(args):
-    """Create a Pluto thread for a new evaluator."""
-    name = args.get("name", "evaluator")
-    words = name.split()
-    if len(words) > 5:
-        name = " ".join(words[:5])
-    if len(name) > 50:
-        name = name[:50].rsplit(" ", 1)[0]
-    headers = pluto_headers()
-    thread = http_request("POST", f"{PLUTO_API}/threads",
-        body={"workflow": "with-data"}, headers=headers)
-    thread_id = thread["id"]
-    # Set name
-    try:
-        http_request("PATCH", f"{PLUTO_API}/threads/{thread_id}",
-            body={"name": name}, headers=headers)
-    except Exception:
-        pass
-    return {
-        "thread_id": thread_id,
-        "example_set_id": thread.get("exampleSetId", ""),
-        "url": f"https://pluto.plurai.ai/thread/{thread_id}",
-    }
 
 def tool_upload_data(args):
     """Upload labeled examples to a thread. ONLY use with data the user explicitly provided from a file."""
@@ -744,8 +721,8 @@ def main():
             if msg is None:
                 break
             handle_message(msg)
-        except Exception:
-            pass
+        except Exception as e:
+            _log.exception("Error handling message: %s", e)
 
 if __name__ == "__main__":
     main()

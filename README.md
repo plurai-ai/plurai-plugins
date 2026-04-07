@@ -6,28 +6,20 @@ Create fine-tuned LLM-as-a-judge evaluators directly from Claude Code.
 
 Say `/judge` and describe what you want to evaluate. The plugin will:
 1. Create an evaluator on the Pluto platform
-2. Ask a few refinement questions
-3. Generate synthetic test data
-4. Optimize the evaluator (LLM or SLM)
-5. Integrate the endpoint into your code
+2. Present refinement questions via interactive UI
+3. Optimize the evaluator (LLM or SLM)
+4. Provide endpoint URL and API key
 
-## Quick Install
-
-```bash
-curl -sL https://raw.githubusercontent.com/plurai-ai/pluto-judge/main/install.sh | bash
-```
-
-Or manually:
+## Installation
 
 ```bash
-# 1. Clone into your project
-git clone https://github.com/plurai-ai/pluto-judge.git
+# Clone into your project
+git clone git@github.com:plurai-ai/pluto-judge.git
 
-# 2. Find your python3 absolute path (required for VS Code)
+# Find your python3 absolute path (required for VS Code)
 which python3
-# e.g. /opt/homebrew/bin/python3
 
-# 3. Create .mcp.json in your project root
+# Create .mcp.json in your project root (replace python path)
 cat > .mcp.json << 'EOF'
 {
     "mcpServers": {
@@ -39,13 +31,25 @@ cat > .mcp.json << 'EOF'
     }
 }
 EOF
-# ⚠️  Replace the command path with YOUR python3 path from step 2
 
-# 4. Approve the MCP server in .claude/settings.json
+# Approve the MCP server in .claude/settings.json
 # Add: "enableAllProjectMcpServers": true
-
-# 5. Restart Claude Code
 ```
+
+## Authentication
+
+The plugin reads your active Pluto session from Chrome cookies (macOS only).
+
+**Setup:**
+1. Log in at https://pluto.plurai.ai in Chrome
+2. Set your Chrome Safe Storage key:
+   ```bash
+   # Get the key (one-time, will prompt for keychain access)
+   security find-generic-password -w -s "Chrome Safe Storage" -a "Chrome"
+   
+   # Add to your shell profile
+   export CHROME_SAFE_STORAGE="<key from above>"
+   ```
 
 ## Usage
 
@@ -61,25 +65,28 @@ Or with existing labeled data:
 
 ## MCP Tools
 
-Once connected, these tools are available:
-
 | Tool | Description |
 |------|-------------|
-| `pluto_create_thread` | Create a new evaluator thread |
-| `pluto_upload_data` | Upload labeled examples |
-| `pluto_send_message` | Chat with the Pluto agent |
-| `pluto_get_results` | Get optimization results |
+| `pluto_start_judge` | Create thread + send task + get refinement questions |
+| `pluto_upload_data` | Upload labeled examples from a user-provided file |
+| `pluto_send_message` | Send follow-up messages (answers, optimize) |
+| `pluto_ask_user` | Present interactive questions to the user |
+| `pluto_get_results` | Get optimization results (baseline vs optimized) |
 | `pluto_create_api_key` | Generate an API key for the endpoint |
 
 ## Requirements
 
 - Python 3.10+ (stdlib only, zero dependencies)
+- macOS with Chrome (for cookie-based auth)
 - Active Pluto account (https://pluto.plurai.ai)
 
 ## Troubleshooting
 
 **MCP tools not showing up?**
+1. Ensure `.mcp.json` uses the **absolute path** to python3
+2. Add `"enableAllProjectMcpServers": true` to `.claude/settings.json`
+3. Restart Claude Code after config changes
 
-1. Check that `.mcp.json` uses the **absolute path** to python3 (not just `python3`)
-2. Ensure `.claude/settings.json` has `"enableAllProjectMcpServers": true`
-3. Restart Claude Code after any config changes
+**Authentication errors?**
+1. Log in to https://pluto.plurai.ai in Chrome
+2. Ensure `CHROME_SAFE_STORAGE` env var is set
