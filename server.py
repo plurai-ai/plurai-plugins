@@ -304,10 +304,11 @@ def tool_start_judge(args):
             agent_response = msg["content"]
             break
 
-    # Step 3: Enable pluto_ask_user
-    global _agent_has_questions, _start_judge_used
+    # Step 3: Enable pluto_ask_user, reset classifier from previous thread
+    global _agent_has_questions, _start_judge_used, _last_classifier_id
     _agent_has_questions = True
     _start_judge_used = True
+    _last_classifier_id = None  # Reset — new thread has no classifier yet
 
     return {
         "thread_id": thread_id,
