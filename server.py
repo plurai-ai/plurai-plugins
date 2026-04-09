@@ -259,13 +259,6 @@ def tool_start_judge(args):
     if len(name) > 50:
         name = name[:50].rsplit(" ", 1)[0]
     task_description = args["task_description"]
-    # Reject if too long — make Claude shorten it
-    if len(task_description) > 150:
-        return {
-            "error": f"task_description is too long ({len(task_description)} chars, max 150). "
-                     "Shorten to 1-2 sentences. Include the task and desired label names but no examples or detailed criteria. "
-                     "Example: 'Classify chatbot responses as health_advice or safe based on medical content.'"
-        }
 
     # Step 1: Create thread
     headers = pluto_headers()
@@ -425,12 +418,6 @@ def tool_send_message(args):
     if message.strip().lower() == "optimize":
         return {
             "error": "Do not send 'Optimize' alone. You must send exactly 'Optimize [LLM]' or 'Optimize [SLM]'."
-        }
-
-    # Block long task descriptions — should use pluto_start_judge instead
-    if not _start_judge_used and len(message) > 150 and "optimize" not in message.lower():
-        return {
-            "error": f"Message too long ({len(message)} chars). Use pluto_start_judge for the initial task description, not pluto_send_message directly."
         }
 
     # If this is an optimization request, check if already done or in progress
