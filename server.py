@@ -587,6 +587,49 @@ def tool_ask_user(args):
         "askUserQuestions": ask_user_questions,
     }
 
+def tool_search_evaluators(args):
+    """Search existing evaluators/classifiers on the Pluto platform."""
+    headers = pluto_headers()
+    classifiers = http_request("GET", f"{PLUTO_API}/classifiers", headers=headers)
+    items = classifiers.get("items", [])
+
+    results = []
+    for c in items:
+        slug = c.get("slug", "")
+        version = c.get("defaultVersion", {}).get("number", "1.0.0")
+        has_optimization = False
+        for identifier in [c["id"], slug]:
+            try:
+                http_request("GET",
+                    f"{PLUTO_API}/classifiers/{identifier}/versions/{version}/optimization",
+                    headers=headers)
+                has_optimization = True
+                break
+            except Exception:
+                continue
+
+        results.append({
+            "id": c["id"],
+            "name": c.get("name", ""),
+            "description": (c.get("description") or "")[:200],
+            "slug": slug,
+            "labels": [p for p in (c.get("outputSchema", {}).get("properties", {}).get("label", {}).get("enum", []))],
+            "endpoint_url": f"https://run.plurai.ai/ioa/v1/{slug}/{version}",
+            "dashboard_url": f"https://pluto.plurai.ai/classifier/{slug}/{version}",
+            "has_optimization": has_optimization,
+            "created_at": c.get("createdAt", ""),
+        })
+
+    return {
+        "count": len(results),
+        "evaluators": results,
+        "instructions": (
+            "Show the user the existing evaluators. If one matches their task, "
+            "ask if they want to reuse it (use its endpoint) or create a new one."
+        ),
+    }
+
+
 def tool_get_results(args):
     """Get optimization results and endpoint info for a classifier."""
     classifier_id = args["classifier_id"]
@@ -690,6 +733,14 @@ TOOLS = {
                 "message": {"type": "string", "description": "Message to send to the agent"},
             },
             "required": ["thread_id", "message"],
+        },
+    },
+    "pluto_search_evaluators": {
+        "fn": tool_search_evaluators,
+        "description": "Search existing evaluators on the Pluto platform. Call this first to check if a relevant evaluator already exists before creating a new one.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
         },
     },
     "pluto_get_results": {

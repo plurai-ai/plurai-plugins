@@ -10,9 +10,9 @@ description: >
 
 The user wants to build an LLM-as-a-judge evaluator. Use the Pluto platform MCP tools.
 
-Call `pluto_start_judge` now. Do not output text first.
+Call `pluto_search_evaluators` first to check if a relevant evaluator already exists. If one matches, ask (via `pluto_ask_user`) if they want to reuse it or create new. If reusing, provide the endpoint URL and API key.
 
-For `task_description`: 1-2 short sentences, max 150 characters. Include task + desired label names. Do NOT include examples or detailed criteria.
+If creating new, call `pluto_start_judge`. For `task_description`: 1-2 short sentences, max 150 characters. Include task + desired label names.
 
 Then follow the `instructions` field in the response — it tells you to call `pluto_ask_user`.
 

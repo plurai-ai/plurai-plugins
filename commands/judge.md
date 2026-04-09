@@ -4,9 +4,11 @@ argument-hint: "[task description or --data file.csv]"
 allowed-tools: ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Agent"]
 ---
 
-Call `pluto_start_judge` now. Do not output text first.
+Call `pluto_search_evaluators` first to check if a relevant evaluator already exists. If one matches the user's task, ask (via `pluto_ask_user`) if they want to reuse it or create a new one. If reusing, skip to providing the endpoint URL and API key.
 
-For `task_description`: 1-2 short sentences, max 150 characters. Include the core task and desired label names if the user mentioned them. Do NOT include examples, detailed criteria, or long explanations. Example: "Classify chatbot responses as 'grounded' or 'hallucinated' based on provided context."
+If creating new, call `pluto_start_judge`.
+
+For `task_description`: 1-2 short sentences, max 150 characters. Include the core task and desired label names if the user mentioned them. Do NOT include examples, detailed criteria, or long explanations.
 
 Then follow the `instructions` field in the response — it tells you to call `pluto_ask_user`.
 
