@@ -423,7 +423,8 @@ def tool_send_message(args):
         }
 
     # If this is an optimization request, check if already done or in progress
-    if message.strip().lower().startswith("optimize"):
+    is_optimize = message.strip().lower().startswith("optimize")
+    if is_optimize:
         _log.warning("OPTIMIZE: thread=%s, classifier_by_thread=%s", thread_id, _classifier_by_thread)
         status = _check_optimization_status(thread_id)
         _log.warning("OPTIMIZE CHECK RESULT: thread=%s, status=%s", thread_id, status.get("status") if status else "None — will send to agent")
@@ -445,6 +446,27 @@ def tool_send_message(args):
             "forwardedProps": {},
         },
     }
+
+    # For optimize requests, fire and forget — don't block the server
+    if is_optimize:
+        import threading
+        def _run_optimize():
+            try:
+                _log.warning("OPTIMIZE BACKGROUND START: thread=%s, message=%s", thread_id, message)
+                events = http_stream(AGENT_API, payload, headers, timeout=600)
+                _log.warning("OPTIMIZE BACKGROUND DONE: thread=%s, events=%d", thread_id, len(events))
+            except Exception as e:
+                _log.warning("OPTIMIZE BACKGROUND ERROR: thread=%s, error=%s", thread_id, str(e))
+        t = threading.Thread(target=_run_optimize, daemon=True)
+        t.start()
+        return {
+            "status": "optimization_started",
+            "message": f"Optimization '{message}' triggered for thread {thread_id}. "
+                       "It runs in the background (~2 min for LLM, ~20 min for SLM). "
+                       "Use pluto_get_results later to check results.",
+            "thread_id": thread_id,
+            "dashboard_url": f"https://pluto.plurai.ai/thread/{thread_id}",
+        }
 
     _log.warning("AGENT CALL: thread=%s, message=%s", thread_id, message[:100])
     events = http_stream(AGENT_API, payload, headers, timeout=300)
