@@ -360,54 +360,55 @@ def _check_optimization_status():
         slug = classifier["slug"]
         version = classifier.get("defaultVersion", {}).get("number", "1.0.0")
 
-        # Try to get optimization results
+        # Try to get optimization results (UUID first, then slug)
+        opt = None
         for identifier in [_last_classifier_id, slug]:
             try:
                 opt = http_request("GET",
                     f"{PLUTO_API}/classifiers/{identifier}/versions/{version}/optimization",
                     headers=headers)
-                baseline = opt.get("baseline", {})
-                optimized = opt.get("optimized", {})
-
-                if optimized and optimized.get("accuracy") is not None:
-                    # Optimization is complete — return results directly
-                    return {
-                        "status": "already_optimized",
-                        "message": "Optimization was already completed. Here are the results.",
-                        "classifier_id": _last_classifier_id,
-                        "slug": slug,
-                        "version": version,
-                        "endpoint_url": f"https://run.plurai.ai/ioa/v1/{slug}/{version}",
-                        "dashboard_url": f"https://pluto.plurai.ai/classifier/{slug}/{version}",
-                        "baseline": {
-                            "accuracy": baseline.get("accuracy"),
-                            "precision": baseline.get("precision"),
-                            "recall": baseline.get("recall"),
-                        },
-                        "optimized": {
-                            "accuracy": optimized.get("accuracy"),
-                            "precision": optimized.get("precision"),
-                            "recall": optimized.get("recall"),
-                        },
-                    }
-                elif baseline and baseline.get("accuracy") is not None:
-                    # Baseline exists but no optimized results — optimization may be in progress
-                    return {
-                        "status": "optimization_in_progress",
-                        "message": "Optimization is already running. Baseline results are available. "
-                                   "Wait for optimization to complete, then call pluto_get_results.",
-                        "classifier_id": _last_classifier_id,
-                        "baseline": {
-                            "accuracy": baseline.get("accuracy"),
-                            "precision": baseline.get("precision"),
-                            "recall": baseline.get("recall"),
-                        },
-                    }
-                break
+                break  # Got results, stop trying
             except HTTPError as e:
                 if e.code == 404:
-                    continue  # No results yet — optimization hasn't started
+                    continue
                 raise
+
+        if opt:
+            baseline = opt.get("baseline", {})
+            optimized = opt.get("optimized", {})
+
+            if optimized and optimized.get("accuracy") is not None:
+                return {
+                    "status": "already_optimized",
+                    "message": "Optimization was already completed. Here are the results.",
+                    "classifier_id": _last_classifier_id,
+                    "slug": slug,
+                    "version": version,
+                    "endpoint_url": f"https://run.plurai.ai/ioa/v1/{slug}/{version}",
+                    "dashboard_url": f"https://pluto.plurai.ai/classifier/{slug}/{version}",
+                    "baseline": {
+                        "accuracy": baseline.get("accuracy"),
+                        "precision": baseline.get("precision"),
+                        "recall": baseline.get("recall"),
+                    },
+                    "optimized": {
+                        "accuracy": optimized.get("accuracy"),
+                        "precision": optimized.get("precision"),
+                        "recall": optimized.get("recall"),
+                    },
+                }
+            elif baseline and baseline.get("accuracy") is not None:
+                return {
+                    "status": "optimization_in_progress",
+                    "message": "Optimization is already running. Baseline results are available. "
+                               "Wait for optimization to complete, then call pluto_get_results.",
+                    "classifier_id": _last_classifier_id,
+                    "baseline": {
+                        "accuracy": baseline.get("accuracy"),
+                        "precision": baseline.get("precision"),
+                        "recall": baseline.get("recall"),
+                    },
+                }
     except Exception:
         pass  # Can't check — proceed normally
 
@@ -483,13 +484,12 @@ def tool_send_message(args):
         "agent_response": agent_response,
         "message_count": len(conversation),
     }
+    global _agent_has_questions, _last_classifier_id
     if classifier_id:
         result["classifier_id"] = classifier_id
-        global _last_classifier_id
         _last_classifier_id = classifier_id
 
     # If the response contains refinement questions, wrap with instructions
-    global _agent_has_questions
     if "?" in agent_response and not classifier_id:
         _agent_has_questions = True
         result["action_required"] = "PRESENT_QUESTIONS_TO_USER"
