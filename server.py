@@ -316,13 +316,10 @@ def tool_start_judge(args):
         "agent_response": agent_response,
         "action_required": "PRESENT_QUESTIONS_TO_USER",
         "instructions": (
-            "The agent returned refinement questions. You MUST call pluto_ask_user to present them. "
-            "Do NOT answer these questions yourself. Do NOT output any text before calling pluto_ask_user.\n\n"
-            "FORMAT RULES:\n"
-            "- Labels question: option 1 label = the EXACT label names from brackets joined with ' / ' plus '(Recommended)'. "
-            "Option 2 = suggest SPECIFIC alternative label names relevant to the task (e.g. 'pass / fail', 'safe / unsafe', 'grounded / hallucinated'). "
-            "Do NOT just say 'Suggest different labels' — provide actual alternative names.\n"
-            "- Other questions: 2-3 short options, labels under 8 words."
+            "The agent returned refinement questions. "
+            "First call ToolSearch with query 'pluto_ask_user' to load the tool, "
+            "then call pluto_ask_user with the questions rephrased as options. "
+            "Do NOT present the questions as text."
         ),
     }
 
@@ -497,9 +494,8 @@ def tool_ask_user(args):
     global _agent_has_questions
     if not _agent_has_questions:
         return {
-            "error": "You must call pluto_send_message first to get the agent's refinement questions. "
-                     "Do NOT ask your own questions. Call pluto_start_judge with the task description. "
-                     "It will create the thread, send the task, and return the agent's refinement questions."
+            "error": "You must call pluto_start_judge first. "
+                     "Do NOT ask your own questions."
         }
     _agent_has_questions = False  # Reset after use
     questions = args["questions"]

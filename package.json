@@ -1,11 +1,17 @@
 {
-  "name": "@plurai/pluto-judge",
-  "version": "0.1.0",
+  "name": "@eladl/pluto-judge",
+  "version": "0.1.5",
   "description": "Claude Code MCP server for creating LLM-as-a-judge evaluators via the Pluto platform",
   "bin": {
-    "pluto-judge": "./bin/pluto-judge.js"
+    "pluto-judge": "bin/index.js"
   },
-  "keywords": ["mcp", "claude-code", "llm-as-a-judge", "evaluation", "pluto"],
+  "keywords": [
+    "mcp",
+    "claude-code",
+    "llm-as-a-judge",
+    "evaluation",
+    "pluto"
+  ],
   "author": {
     "name": "Plurai AI",
     "url": "https://plurai.ai"
@@ -13,7 +19,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/plurai-ai/pluto-judge"
+    "url": "git+https://github.com/plurai-ai/pluto-judge.git"
   },
   "files": [
     "bin/",
