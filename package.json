@@ -1,5 +1,5 @@
 {
-  "name": "pluto-judge",
+  "name": "@plurai/pluto-judge",
   "version": "0.1.0",
   "description": "Claude Code MCP server for creating LLM-as-a-judge evaluators via the Pluto platform",
   "bin": {
@@ -19,6 +19,7 @@
     "bin/",
     "server.py",
     "commands/",
+    "skills/",
     ".claude-plugin/"
   ],
   "engines": {
