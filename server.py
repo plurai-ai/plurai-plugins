@@ -6,6 +6,7 @@ Uses only Python stdlib (urllib, json, ssl, uuid).
 """
 
 import json
+import os
 import ssl
 import sys
 import uuid
@@ -121,7 +122,6 @@ def http_stream(url, body, headers, timeout=300):
 
 # ── Credentials ────────────────────────────────────────────────────────────
 
-import os
 import hashlib
 import sqlite3
 import shutil
