@@ -53,7 +53,11 @@ def send_request(method, params):
         # If it's a different message (notification, etc.), skip and keep waiting
 
 import logging as _log
-_log.basicConfig(level=_log.WARNING)  # Set to DEBUG for troubleshooting
+_log.basicConfig(
+    filename=os.path.join(os.path.expanduser("~"), ".pluto-judge-debug.log"),
+    level=_log.WARNING,
+    format="%(asctime)s %(message)s",
+)
 
 def elicit_form(message, schema):
     """Ask the user a question via MCP elicitation. Returns {action, content} or None."""
@@ -420,7 +424,9 @@ def tool_send_message(args):
 
     # If this is an optimization request, check if already done or in progress
     if message.strip().lower().startswith("optimize"):
+        _log.warning("OPTIMIZE: thread=%s, classifier_by_thread=%s", thread_id, _classifier_by_thread)
         status = _check_optimization_status(thread_id)
+        _log.warning("OPTIMIZE CHECK RESULT: thread=%s, status=%s", thread_id, status.get("status") if status else "None — will send to agent")
         if status:
             return status
 
@@ -440,7 +446,9 @@ def tool_send_message(args):
         },
     }
 
+    _log.warning("AGENT CALL: thread=%s, message=%s", thread_id, message[:100])
     events = http_stream(AGENT_API, payload, headers, timeout=300)
+    _log.warning("AGENT RESPONSE: thread=%s, events=%d", thread_id, len(events))
 
     # Extract conversation and classifier_id from events
     conversation = []
@@ -469,6 +477,8 @@ def tool_send_message(args):
         "agent_response": agent_response,
         "message_count": len(conversation),
     }
+    _log.warning("AGENT RESULT: thread=%s, classifier_id=%s, response=%s", thread_id, classifier_id, agent_response[:100])
+
     global _agent_has_questions
     if classifier_id:
         result["classifier_id"] = classifier_id
