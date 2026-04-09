@@ -129,7 +129,7 @@ PLUTO_API = "https://pluto.plurai.ai/api/pluto"
 AGENT_API = "https://pluto.plurai.ai/api/agent/api/copilotkit"
 
 _agent_has_questions = False  # Set to True after pluto_send_message returns refinement questions
-_last_classifier_id = None   # Track classifier ID across tool calls
+_classifier_by_thread = {}   # Track classifier ID per thread: {thread_id: classifier_id}
 CLERK_FAPI = "https://clerk.plurai.ai/v1"
 
 # ── Chrome cookie reader (hack for local dev/testing) ─────────────────────
@@ -305,10 +305,9 @@ def tool_start_judge(args):
             break
 
     # Step 3: Enable pluto_ask_user, reset classifier from previous thread
-    global _agent_has_questions, _start_judge_used, _last_classifier_id
+    global _agent_has_questions, _start_judge_used
     _agent_has_questions = True
     _start_judge_used = True
-    _last_classifier_id = None  # Reset — new thread has no classifier yet
 
     return {
         "thread_id": thread_id,
@@ -340,20 +339,21 @@ def tool_upload_data(args):
 _start_judge_used = False  # Track if pluto_start_judge was called
 
 
-def _check_optimization_status():
+def _check_optimization_status(thread_id):
     """Check if optimization is already done or in progress. Returns a result dict or None."""
-    if not _last_classifier_id:
+    classifier_id = _classifier_by_thread.get(thread_id)
+    if not classifier_id:
         return None
 
     try:
         headers = pluto_headers()
-        classifier = http_request("GET", f"{PLUTO_API}/classifiers/{_last_classifier_id}", headers=headers)
+        classifier = http_request("GET", f"{PLUTO_API}/classifiers/{classifier_id}", headers=headers)
         slug = classifier["slug"]
         version = classifier.get("defaultVersion", {}).get("number", "1.0.0")
 
         # Try to get optimization results (UUID first, then slug)
         opt = None
-        for identifier in [_last_classifier_id, slug]:
+        for identifier in [classifier_id, slug]:
             try:
                 opt = http_request("GET",
                     f"{PLUTO_API}/classifiers/{identifier}/versions/{version}/optimization",
@@ -372,7 +372,7 @@ def _check_optimization_status():
                 return {
                     "status": "already_optimized",
                     "message": "Optimization was already completed. Here are the results.",
-                    "classifier_id": _last_classifier_id,
+                    "classifier_id": classifier_id,
                     "slug": slug,
                     "version": version,
                     "endpoint_url": f"https://run.plurai.ai/ioa/v1/{slug}/{version}",
@@ -393,7 +393,7 @@ def _check_optimization_status():
                     "status": "optimization_in_progress",
                     "message": "Optimization is already running. Baseline results are available. "
                                "Wait for optimization to complete, then call pluto_get_results.",
-                    "classifier_id": _last_classifier_id,
+                    "classifier_id": classifier_id,
                     "baseline": {
                         "accuracy": baseline.get("accuracy"),
                         "precision": baseline.get("precision"),
@@ -420,7 +420,7 @@ def tool_send_message(args):
 
     # If this is an optimization request, check if already done or in progress
     if message.strip().lower().startswith("optimize"):
-        status = _check_optimization_status()
+        status = _check_optimization_status(thread_id)
         if status:
             return status
 
@@ -469,10 +469,10 @@ def tool_send_message(args):
         "agent_response": agent_response,
         "message_count": len(conversation),
     }
-    global _agent_has_questions, _last_classifier_id
+    global _agent_has_questions
     if classifier_id:
         result["classifier_id"] = classifier_id
-        _last_classifier_id = classifier_id
+        _classifier_by_thread[thread_id] = classifier_id
 
     # If the response contains refinement questions, wrap with instructions
     if "?" in agent_response and not classifier_id:
