@@ -1,9 +1,7 @@
 {
     "mcpServers": {
         "pluto-judge": {
-            "command": "/opt/homebrew/bin/python3",
-            "args": ["server.py"],
-            "cwd": "${CLAUDE_PLUGIN_ROOT}"
+            "command": "${CLAUDE_PLUGIN_ROOT}/run.sh"
         }
     }
 }
