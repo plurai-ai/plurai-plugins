@@ -129,6 +129,7 @@ PLUTO_API = "https://pluto.plurai.ai/api/pluto"
 AGENT_API = "https://pluto.plurai.ai/api/agent/api/copilotkit"
 
 _agent_has_questions = False  # Set to True after pluto_send_message returns refinement questions
+_last_classifier_id = None   # Track classifier ID across tool calls
 CLERK_FAPI = "https://clerk.plurai.ai/v1"
 
 # ── Chrome cookie reader (hack for local dev/testing) ─────────────────────
@@ -347,6 +348,72 @@ def tool_upload_data(args):
 
 _start_judge_used = False  # Track if pluto_start_judge was called
 
+
+def _check_optimization_status():
+    """Check if optimization is already done or in progress. Returns a result dict or None."""
+    if not _last_classifier_id:
+        return None
+
+    try:
+        headers = pluto_headers()
+        classifier = http_request("GET", f"{PLUTO_API}/classifiers/{_last_classifier_id}", headers=headers)
+        slug = classifier["slug"]
+        version = classifier.get("defaultVersion", {}).get("number", "1.0.0")
+
+        # Try to get optimization results
+        for identifier in [_last_classifier_id, slug]:
+            try:
+                opt = http_request("GET",
+                    f"{PLUTO_API}/classifiers/{identifier}/versions/{version}/optimization",
+                    headers=headers)
+                baseline = opt.get("baseline", {})
+                optimized = opt.get("optimized", {})
+
+                if optimized and optimized.get("accuracy") is not None:
+                    # Optimization is complete — return results directly
+                    return {
+                        "status": "already_optimized",
+                        "message": "Optimization was already completed. Here are the results.",
+                        "classifier_id": _last_classifier_id,
+                        "slug": slug,
+                        "version": version,
+                        "endpoint_url": f"https://run.plurai.ai/ioa/v1/{slug}/{version}",
+                        "dashboard_url": f"https://pluto.plurai.ai/classifier/{slug}/{version}",
+                        "baseline": {
+                            "accuracy": baseline.get("accuracy"),
+                            "precision": baseline.get("precision"),
+                            "recall": baseline.get("recall"),
+                        },
+                        "optimized": {
+                            "accuracy": optimized.get("accuracy"),
+                            "precision": optimized.get("precision"),
+                            "recall": optimized.get("recall"),
+                        },
+                    }
+                elif baseline and baseline.get("accuracy") is not None:
+                    # Baseline exists but no optimized results — optimization may be in progress
+                    return {
+                        "status": "optimization_in_progress",
+                        "message": "Optimization is already running. Baseline results are available. "
+                                   "Wait for optimization to complete, then call pluto_get_results.",
+                        "classifier_id": _last_classifier_id,
+                        "baseline": {
+                            "accuracy": baseline.get("accuracy"),
+                            "precision": baseline.get("precision"),
+                            "recall": baseline.get("recall"),
+                        },
+                    }
+                break
+            except HTTPError as e:
+                if e.code == 404:
+                    continue  # No results yet — optimization hasn't started
+                raise
+    except Exception:
+        pass  # Can't check — proceed normally
+
+    return None  # No optimization found — proceed with sending the message
+
+
 def tool_send_message(args):
     """Send a message to the Pluto agent and get the response."""
     _log.debug("tool_send_message called, message length: %d, message: %s", len(args.get("message", "")), args.get("message", "")[:100])
@@ -364,6 +431,12 @@ def tool_send_message(args):
         return {
             "error": f"Message too long ({len(message)} chars). Use pluto_start_judge for the initial task description, not pluto_send_message directly."
         }
+
+    # If this is an optimization request, check if already done or in progress
+    if message.strip().lower().startswith("optimize"):
+        status = _check_optimization_status()
+        if status:
+            return status
 
     headers = agent_headers()
 
@@ -412,6 +485,8 @@ def tool_send_message(args):
     }
     if classifier_id:
         result["classifier_id"] = classifier_id
+        global _last_classifier_id
+        _last_classifier_id = classifier_id
 
     # If the response contains refinement questions, wrap with instructions
     global _agent_has_questions
