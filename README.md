@@ -1,10 +1,10 @@
-# Pluto Judge — Claude Code Plugin
+# Pluto Judge — Claude Code MCP Server
 
 Create fine-tuned LLM-as-a-judge evaluators directly from Claude Code.
 
 ## What it does
 
-Say `/judge` and describe what you want to evaluate. The plugin will:
+Type `/judge` and describe what you want to evaluate. The plugin will:
 1. Create an evaluator on the Pluto platform
 2. Present refinement questions via interactive UI
 3. Optimize the evaluator (LLM or SLM)
@@ -12,55 +12,40 @@ Say `/judge` and describe what you want to evaluate. The plugin will:
 
 ## Installation
 
-```bash
-# Clone into your project
-git clone git@github.com:plurai-ai/pluto-judge.git
+Add to your project's `.mcp.json`:
 
-# Find your python3 absolute path (required for VS Code)
-which python3
-
-# Create .mcp.json in your project root (replace python path)
-cat > .mcp.json << 'EOF'
+```json
 {
     "mcpServers": {
         "pluto-judge": {
-            "command": "/opt/homebrew/bin/python3",
-            "args": ["server.py"],
-            "cwd": "./pluto-judge"
+            "command": "npx",
+            "args": ["-y", "pluto-judge"]
         }
     }
 }
-EOF
-
-# Approve the MCP server in .claude/settings.json
-# Add: "enableAllProjectMcpServers": true
 ```
+
+That's it. Requires Node.js 16+ and Python 3.10+.
 
 ## Authentication
 
-The plugin reads your active Pluto session from Chrome cookies (macOS only).
+The server reads your active Pluto session from Chrome cookies (macOS).
 
-**Setup:**
-1. Log in at https://pluto.plurai.ai in Chrome
-2. Set your Chrome Safe Storage key:
-   ```bash
-   # Get the key (one-time, will prompt for keychain access)
-   security find-generic-password -w -s "Chrome Safe Storage" -a "Chrome"
-   
-   # Add to your shell profile
-   export CHROME_SAFE_STORAGE="<key from above>"
-   ```
+**One-time setup:**
+```bash
+# 1. Log in at https://pluto.plurai.ai in Chrome
+
+# 2. Get your Chrome Safe Storage key
+security find-generic-password -w -s "Chrome Safe Storage" -a "Chrome"
+
+# 3. Add to shell profile (~/.zshrc)
+export CHROME_SAFE_STORAGE="<key from step 2>"
+```
 
 ## Usage
 
 ```
 /judge I need to evaluate if my RAG responses are grounded in the context
-```
-
-Or with existing labeled data:
-
-```
-/judge --data grounding_examples.csv
 ```
 
 ## MCP Tools
@@ -76,17 +61,7 @@ Or with existing labeled data:
 
 ## Requirements
 
-- Python 3.10+ (stdlib only, zero dependencies)
+- Node.js 16+ (for npx)
+- Python 3.10+ (stdlib only, zero Python dependencies)
 - macOS with Chrome (for cookie-based auth)
 - Active Pluto account (https://pluto.plurai.ai)
-
-## Troubleshooting
-
-**MCP tools not showing up?**
-1. Ensure `.mcp.json` uses the **absolute path** to python3
-2. Add `"enableAllProjectMcpServers": true` to `.claude/settings.json`
-3. Restart Claude Code after config changes
-
-**Authentication errors?**
-1. Log in to https://pluto.plurai.ai in Chrome
-2. Ensure `CHROME_SAFE_STORAGE` env var is set
