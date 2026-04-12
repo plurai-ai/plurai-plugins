@@ -1,6 +1,6 @@
 {
   "name": "@eladl/pluto-judge",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "Claude Code MCP server for creating LLM-as-a-judge evaluators via the Pluto platform",
   "bin": {
     "pluto-judge": "bin/index.js"
