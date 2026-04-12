@@ -254,7 +254,7 @@ def agent_headers():
 
 def tool_start_judge(args):
     """Create thread, send task to agent, and present refinement questions — all in one step."""
-    _log.debug("tool_start_judge called, task_description length: %d", len(args.get("task_description", "")))
+    _log.warning("START_JUDGE: name=%s, task_description=%s", args.get("name"), args.get("task_description"))
     name = args.get("name", "evaluator")
     # Enforce short names — truncate to max 5 words / 50 chars
     words = name.split()
