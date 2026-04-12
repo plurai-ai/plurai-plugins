@@ -264,6 +264,22 @@ def tool_start_judge(args):
         name = name[:50].rsplit(" ", 1)[0]
     task_description = args["task_description"]
 
+    # Check if task involves multi-field input but no template specified
+    multi_field_keywords = ["conversation", "context", "response", "grounding", "grounded",
+                            "multi-turn", "dialogue", "chat history", "user message",
+                            "qa", "question", "answer"]
+    needs_template = any(kw in task_description.lower() for kw in multi_field_keywords)
+    has_template = "input format" in task_description.lower() or "##" in task_description
+    if needs_template and not has_template:
+        return {
+            "error": "This evaluation involves multiple input fields but no input template was specified. "
+                     "The evaluator receives a SINGLE text input, so you must define how fields are combined. "
+                     "Add an input format to the task_description, e.g.:\n"
+                     "- Grounding: \"... Input format: '## Context:\\n{context}\\n\\n## Response:\\n{response}'\"\n"
+                     "- Conversation: \"... Input format: 'User: {msg}\\nAI: {msg}\\nUser: {msg}\\nAI: {msg}'\"\n"
+                     "- QA: \"... Input format: '## Question:\\n{question}\\n\\n## Answer:\\n{answer}'\""
+        }
+
     # Step 1: Create thread
     headers = pluto_headers()
     thread = http_request("POST", f"{PLUTO_API}/threads",
