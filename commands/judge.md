@@ -8,7 +8,13 @@ Call `pluto_search_evaluators` first to check if a relevant evaluator already ex
 
 If creating new, call `pluto_start_judge`.
 
-For `task_description`: 1-2 short sentences, max 150 characters. Include the core task and desired label names if the user mentioned them. Do NOT include examples, detailed criteria, or long explanations.
+For `task_description`: 1-2 short sentences. Include the core task and desired label names if the user mentioned them. Do NOT include examples, detailed criteria, or long explanations.
+
+**Important — input template**: If the evaluation involves multiple fields (e.g. context + response for grounding, or a conversation), you MUST specify the input template explicitly in the task description. The evaluator receives a SINGLE text input, so all fields must be combined into one message using a clear template. Examples:
+
+- Grounding: "Input format: '## Context:\n{context}\n\n## Response:\n{response}'"
+- Conversation: "Input format: 'User: {msg}\nAI: {msg}\nUser: {msg}\nAI: {msg}'"
+- QA: "Input format: '## Question:\n{question}\n\n## Answer:\n{answer}'"
 
 Then follow the `instructions` field in the response — it tells you to call `pluto_ask_user`.
 
