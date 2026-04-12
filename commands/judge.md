@@ -24,4 +24,4 @@ After the user answers:
 3. Call `pluto_send_message` with EXACTLY `Optimize [LLM]` or `Optimize [SLM]` based on user's choice. These are hardcoded strings — do not modify them. Only one call needed.
 4. Call `pluto_get_results` with classifier_id. Show baseline vs optimized metrics (accuracy, precision, recall) and the improvement delta for each.
 5. Call `pluto_ask_user` to ask about API key and code integration.
-6. If wanted, call `pluto_create_api_key` and add integration code.
+6. If wanted, call `pluto_create_api_key` and add integration code. The integration code MUST format the input using the same template that was specified in the task description. For example, if the evaluator uses "## Context:\n{context}\n\n## Response:\n{response}", the code must combine the fields into a single string following that exact template before sending to the endpoint. The evaluator only accepts a single message — never multiple messages.
