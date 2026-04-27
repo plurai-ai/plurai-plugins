@@ -7,15 +7,5 @@
         "url": "https://plurai.ai"
     },
     "homepage": "https://pluto.plurai.ai",
-    "keywords": ["evaluation", "llm-as-a-judge", "fine-tuning", "classifier"],
-    "userConfig": {
-        "clerk_secret": {
-            "description": "Clerk Backend API key for authentication",
-            "sensitive": true
-        },
-        "clerk_session_id": {
-            "description": "Active Clerk session ID (from browser login at pluto.plurai.ai)",
-            "sensitive": true
-        }
-    }
+    "keywords": ["evaluation", "llm-as-a-judge", "fine-tuning", "classifier"]
 }

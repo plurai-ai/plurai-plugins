@@ -63,7 +63,7 @@ if [ -f "$MCP_FILE" ]; then
         echo "Add this to $MCP_FILE under mcpServers:"
         echo "    \"pluto-judge\": {"
         echo "        \"command\": \"$PYTHON3\","
-        echo "        \"args\": [\"server.py\"],"
+        echo "        \"args\": [\"src/server.py\"],"
         echo "        \"cwd\": \"$PLUGIN_DIR\""
         echo "    }"
     fi
@@ -73,7 +73,7 @@ else
     "mcpServers": {
         "pluto-judge": {
             "command": "$PYTHON3",
-            "args": ["server.py"],
+            "args": ["src/server.py"],
             "cwd": "$PLUGIN_DIR"
         }
     }
@@ -108,21 +108,19 @@ SETEOF
     echo "Created $SETTINGS_FILE"
 fi
 
-# ── 6. Chrome auth setup ─────────────────────────────────────────────────
+# ── 6. Auth setup ────────────────────────────────────────────────────────
 echo ""
 echo "── Auth Setup ──"
-if [ -z "$CHROME_SAFE_STORAGE" ]; then
-    echo "Run this once to get your Chrome key:"
-    echo "  security find-generic-password -w -s 'Chrome Safe Storage' -a 'Chrome'"
-    echo ""
-    echo "Then add to your shell profile (~/.zshrc):"
-    echo "  export CHROME_SAFE_STORAGE=\"<key from above>\""
+if [ -f "$HOME/.config/pluto/credentials.json" ]; then
+    echo "Credentials already present at ~/.config/pluto/credentials.json"
+    echo "(Run \`npx pluto-judge auth status\` to inspect.)"
 else
-    echo "CHROME_SAFE_STORAGE is set"
+    echo "Run this once to log in via your browser:"
+    echo "  npx pluto-judge auth login"
 fi
 
 echo ""
 echo "── Done! ──"
-echo "1. Log in to https://pluto.plurai.ai in Chrome"
+echo "1. Run: npx pluto-judge auth login"
 echo "2. Restart Claude Code"
 echo "3. Type: /judge"

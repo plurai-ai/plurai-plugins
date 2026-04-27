@@ -6,12 +6,16 @@ Uses only Python stdlib (urllib, json, ssl, uuid).
 """
 
 import json
+import logging as _log
 import os
 import ssl
 import sys
 import uuid
-from urllib.request import Request, urlopen
 from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+
+import auth
+from auth import agent_headers, pluto_headers
 
 # ── MCP Protocol (stdio JSON-RPC) ──────────────────────────────────────────
 
@@ -53,7 +57,6 @@ def send_request(method, params):
             return msg.get("result")
         # If it's a different message (notification, etc.), skip and keep waiting
 
-import logging as _log
 _log.basicConfig(
     filename=os.path.join(os.path.expanduser("~"), ".pluto-judge-debug.log"),
     level=_log.WARNING,
@@ -120,135 +123,16 @@ def http_stream(url, body, headers, timeout=300):
                     pass
     return events
 
-# ── Credentials ────────────────────────────────────────────────────────────
-
-import hashlib
-import sqlite3
-import shutil
-import subprocess
-import tempfile
-import time
+# ── Pluto API endpoints + tool-flow state ─────────────────────────────────
 
 PLUTO_API = "https://pluto.plurai.ai/api/pluto"
 AGENT_API = "https://pluto.plurai.ai/api/agent/api/copilotkit"
 
 _agent_has_questions = False  # Set to True after pluto_send_message returns refinement questions
-_classifier_by_thread = {}   # Track classifier ID per thread: {thread_id: classifier_id}
-CLERK_FAPI = "https://clerk.plurai.ai/v1"
+_classifier_by_thread = {}    # Track classifier ID per thread: {thread_id: classifier_id}
 
-# ── Chrome cookie reader (hack for local dev/testing) ─────────────────────
-
-_CHROME_SAFE_STORAGE = os.environ.get("CHROME_SAFE_STORAGE", "")
-_CHROME_KEY = hashlib.pbkdf2_hmac(
-    'sha1',
-    _CHROME_SAFE_STORAGE.encode(),
-    b'saltysalt', 1003, dklen=16
-) if _CHROME_SAFE_STORAGE else None
-_token_cache = {}  # {template: (jwt, expire_time)}
-
-def _decrypt_chrome_cookie(enc_value):
-    """Decrypt a Chrome v10-encrypted cookie value."""
-    if enc_value[:3] != b'v10':
-        return None
-    if not _CHROME_KEY:
-        return None
-    key = _CHROME_KEY
-    iv = b' ' * 16
-    with tempfile.NamedTemporaryFile(delete=False) as f:
-        f.write(enc_value[3:])
-        f.flush()
-        result = subprocess.run(
-            ['openssl', 'enc', '-aes-128-cbc', '-d', '-nopad',
-             '-K', key.hex(), '-iv', iv.hex(), '-in', f.name],
-            capture_output=True
-        )
-        os.unlink(f.name)
-    dec = result.stdout
-    if not dec:
-        return None
-    pad_len = dec[-1]
-    if 0 < pad_len <= 16:
-        dec = dec[:-pad_len]
-    value = dec.decode('utf-8', errors='replace')
-    # Find JWT start (after possible garbage prefix from block cipher)
-    jwt_start = value.find('eyJ')
-    return value[jwt_start:] if jwt_start >= 0 else value
-
-def _read_chrome_cookie(host_pattern, cookie_name):
-    """Read a cookie from Chrome's cookie DB."""
-    for profile in ['Profile 1', 'Default']:
-        db_path = os.path.expanduser(f'~/Library/Application Support/Google/Chrome/{profile}/Cookies')
-        if not os.path.exists(db_path):
-            continue
-        tmp = tempfile.mktemp(suffix='.db')
-        shutil.copy2(db_path, tmp)
-        try:
-            conn = sqlite3.connect(tmp)
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT encrypted_value FROM cookies WHERE host_key LIKE ? AND name = ? ORDER BY expires_utc DESC LIMIT 1",
-                (host_pattern, cookie_name)
-            )
-            row = cur.fetchone()
-            conn.close()
-            if row:
-                return _decrypt_chrome_cookie(row[0])
-        finally:
-            os.unlink(tmp)
-    return None
-
-def _get_client_cookie_and_session_id():
-    """Read __client JWT and extract session ID from __session JWT."""
-    client_jwt = _read_chrome_cookie('%clerk.plurai.ai%', '__client')
-    session_jwt = _read_chrome_cookie('%pluto.plurai.ai%', '__session')
-    if not session_jwt:
-        return None, None
-    # Extract session ID from JWT payload
-    import base64
-    parts = session_jwt.split('.')
-    if len(parts) < 2:
-        return client_jwt, None
-    p = parts[1] + '=' * (4 - len(parts[1]) % 4)
-    payload = json.loads(base64.urlsafe_b64decode(p))
-    return client_jwt, payload.get('sid')
-
-def get_token(template=None):
-    """Get a fresh Clerk JWT via Frontend API using Chrome cookies."""
-    cache_key = template or '__default__'
-    cached = _token_cache.get(cache_key)
-    if cached and cached[1] > time.time():
-        return cached[0]
-
-    client_jwt, session_id = _get_client_cookie_and_session_id()
-    if not session_id:
-        raise RuntimeError("No active Pluto session found in Chrome. Log in at pluto.plurai.ai first.")
-
-    path = f"{CLERK_FAPI}/client/sessions/{session_id}/tokens"
-    if template:
-        path += f"/{template}"
-    path += "?_clerk_js_version=5.0.0"
-
-    data = b''
-    req = Request(path, data=data, method="POST")
-    req.add_header("Content-Type", "application/x-www-form-urlencoded")
-    req.add_header("Origin", "https://pluto.plurai.ai")
-    req.add_header("User-Agent", "Mozilla/5.0")
-    if client_jwt:
-        req.add_header("Cookie", f"__client={client_jwt}")
-
-    with urlopen(req, timeout=10, context=_SSL_CTX) as resp:
-        result = json.loads(resp.read().decode())
-
-    jwt = result.get("jwt") or result.get("response", {}).get("jwt")
-    if jwt:
-        _token_cache[cache_key] = (jwt, time.time() + 50)  # cache for 50s (tokens last 60s)
-    return jwt
-
-def pluto_headers():
-    return {"Authorization": f"Bearer {get_token()}"}
-
-def agent_headers():
-    return {"Authorization": f"Bearer {get_token('pluto-agent-authz')}"}
+# Auth (login/logout/status, token caching, PKCE flow) lives in src/auth.py.
+# This file imports `pluto_headers` and `agent_headers` from it; tool calls below use those.
 
 # ── Tool implementations ───────────────────────────────────────────────────
 
@@ -352,7 +236,7 @@ def tool_upload_data(args):
     file_name = args.get("file_name", "examples.csv")
     source = args.get("source", "")
     headers = pluto_headers()
-    result = http_request("POST", f"{PLUTO_API}/example-sets/{example_set_id}/files",
+    http_request("POST", f"{PLUTO_API}/example-sets/{example_set_id}/files",
         body={"fileName": file_name, "records": records}, headers=headers, timeout=60)
     return {"status": "uploaded", "count": len(records), "source": source}
 
@@ -873,6 +757,8 @@ def handle_message(msg):
 # ── Main loop ─────────────────────────────────────────────────────────────
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "auth":
+        sys.exit(auth.main(sys.argv[2:]))
     while True:
         try:
             msg = read_message()
