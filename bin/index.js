@@ -4,7 +4,7 @@ const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 
-const serverPy = path.join(__dirname, "..", "server.py");
+const serverPy = path.join(__dirname, "..", "src", "server.py");
 
 // Find python3 — VS Code has minimal PATH so check common locations
 const candidates = [
@@ -34,14 +34,20 @@ if (!python) {
   process.exit(1);
 }
 
-// Spawn python3 server.py and pipe stdin/stdout through
-const child = spawn(python, [serverPy], {
-  stdio: ["pipe", "pipe", "inherit"],
+// Forward any CLI args (e.g. `pluto-judge auth login`) to server.py.
+// With no args, server.py runs the MCP stdio loop.
+const userArgs = process.argv.slice(2);
+const isInteractive = userArgs.length > 0;
+
+const child = spawn(python, [serverPy, ...userArgs], {
+  stdio: isInteractive ? "inherit" : ["pipe", "pipe", "inherit"],
   env: { ...process.env },
 });
 
-process.stdin.pipe(child.stdin);
-child.stdout.pipe(process.stdout);
+if (!isInteractive) {
+  process.stdin.pipe(child.stdin);
+  child.stdout.pipe(process.stdout);
+}
 
 child.on("exit", (code) => process.exit(code || 0));
 process.on("SIGTERM", () => child.kill("SIGTERM"));

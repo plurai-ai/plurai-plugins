@@ -29,17 +29,21 @@ That's it. Requires Node.js 16+ and Python 3.10+.
 
 ## Authentication
 
-The server reads your active Pluto session from Chrome cookies (macOS).
+Browser-based login via OAuth 2.0 + PKCE against Clerk (Pluto's identity
+provider). Cross-platform — any OS, any browser.
 
 **One-time setup:**
 ```bash
-# 1. Log in at https://pluto.plurai.ai in Chrome
+npx pluto-judge auth login
+```
 
-# 2. Get your Chrome Safe Storage key
-security find-generic-password -w -s "Chrome Safe Storage" -a "Chrome"
+This opens your default browser to the Pluto login page. After you sign in,
+tokens are stored at `~/.config/pluto/credentials.json` (mode `0600`) and
+refreshed automatically. Other commands:
 
-# 3. Add to shell profile (~/.zshrc)
-export CHROME_SAFE_STORAGE="<key from step 2>"
+```bash
+npx pluto-judge auth status   # Show who you're logged in as
+npx pluto-judge auth logout   # Revoke and remove credentials
 ```
 
 ## Usage
@@ -63,5 +67,4 @@ export CHROME_SAFE_STORAGE="<key from step 2>"
 
 - Node.js 16+ (for npx)
 - Python 3.10+ (stdlib only, zero Python dependencies)
-- macOS with Chrome (for cookie-based auth)
 - Active Pluto account (https://pluto.plurai.ai)
