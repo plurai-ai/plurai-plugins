@@ -1,4 +1,9 @@
-"""Browser-based OAuth 2.0 + PKCE login flow against Clerk for pluto-judge.
+"""Browser-based broker login for pluto-judge.
+
+Sign-in goes through `${PLUTO_API_BASE}/cli-auth` — a webapp page hosted
+behind the Pluto Clerk session middleware that mints a session-template JWT
+(`aud: svc:pluto-agent`) and 302s it to a CLI loopback redirect. See RFC
+0001 (`docs/rfcs/0001-web-broker-cli-auth.md`).
 
 Self-contained — can be run standalone for testing:
 
@@ -7,66 +12,48 @@ Self-contained — can be run standalone for testing:
     python src/auth.py logout
 
 When imported, callers use `pluto_headers()` / `agent_headers()` to get an
-`Authorization` header backed by a fresh Clerk OAuth access token.
+`Authorization` header backed by a fresh JWT. `get_token()` re-runs the
+browser flow inline if the cached JWT is expired; `force_login()` is the
+programmatic re-auth entry point used by the server's 401-retry path.
 """
 
 import base64
-import hashlib
 import http.server
 import json
 import os
 import secrets
-import ssl
 import sys
 import threading
 import time
 import webbrowser
-from urllib.error import HTTPError
-from urllib.parse import parse_qs, urlencode, urlparse
-from urllib.request import Request, urlopen
+from urllib.parse import parse_qs, quote, urlparse
 
-# Clerk OAuth 2.0 endpoints (https://clerk.plurai.ai/.well-known/openid-configuration).
-CLERK_ISSUER = "https://clerk.stg.plurai.ai"
-CLERK_AUTHORIZE_URL = f"{CLERK_ISSUER}/oauth/authorize"
-CLERK_TOKEN_URL = f"{CLERK_ISSUER}/oauth/token"
-CLERK_USERINFO_URL = f"{CLERK_ISSUER}/oauth/userinfo"
-CLERK_REVOKE_URL = f"{CLERK_ISSUER}/oauth/token/revoke"
-
-# Public Clerk OAuth Application client_id for pluto-judge. Set this constant once an OAuth
-# Application has been created in dashboard.clerk.com → Pluto instance → OAuth Applications.
-# Public client (no secret) — PKCE is mandatory. Override via env var for staging/dev.
-CLIENT_ID = os.environ.get("PLUTO_CLERK_CLIENT_ID", "Q8PUrXzINxDoqtnH")
+# Webapp host. Broker page lives at `${PLUTO_API_BASE}/cli-auth`. API tools
+# in `src/server.py` derive their base URLs from the same env var so a single
+# override flips both surfaces together.
+PLUTO_API_BASE = os.environ.get("PLUTO_API_BASE", "https://pluto.stg.plurai.ai")
 
 CRED_PATH = os.path.expanduser(
     os.environ.get("PLUTO_CREDENTIALS_PATH", "~/.config/pluto/credentials.json")
 )
 
-_SSL_CTX = ssl.create_default_context()
+# Loopback ports the CLI tries (in order) for the broker redirect. MUST stay
+# aligned with VITE_ALLOWED_REDIRECT_PORTS in test/cli-auth-broker/.env.example
+# and the eventual server-side allowlist on the Pluto webapp.
+REGISTERED_PORTS = (8765, 8766, 8767, 8768)
+
 _token_lock = threading.Lock()
 
-# Cloudflare in front of Clerk's dev instances blocks the default `Python-urllib/...`
-# UA as a bot. Send a real-looking UA on every Clerk call.
-_USER_AGENT = "pluto-judge/0.1 (+https://pluto.plurai.ai)"
+
+def _b64url_decode(data: str) -> bytes:
+    return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
 
 
-def _b64url(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
-
-
-def _gen_pkce():
-    verifier = _b64url(secrets.token_bytes(32))
-    challenge = _b64url(hashlib.sha256(verifier.encode()).digest())
-    return verifier, challenge
-
-
-def _form_post(url, data):
-    body = urlencode(data).encode()
-    req = Request(url, data=body, method="POST")
-    req.add_header("Content-Type", "application/x-www-form-urlencoded")
-    req.add_header("Accept", "application/json")
-    req.add_header("User-Agent", _USER_AGENT)
-    with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
-        return json.loads(resp.read().decode())
+def _decode_jwt_payload(jwt: str) -> dict:
+    try:
+        return json.loads(_b64url_decode(jwt.split(".")[1]).decode())
+    except (IndexError, ValueError, json.JSONDecodeError):
+        return {}
 
 
 def _save_credentials(creds):
@@ -86,37 +73,24 @@ def _load_credentials():
         return None
 
 
-def _refresh_token(creds):
-    if not creds.get("refresh_token"):
-        raise RuntimeError("Not logged in. Run: npx pluto-judge auth login")
-    resp = _form_post(CLERK_TOKEN_URL, {
-        "grant_type": "refresh_token",
-        "refresh_token": creds["refresh_token"],
-        "client_id": CLIENT_ID,
-    })
-    creds["access_token"] = resp["access_token"]
-    creds["expires_at"] = int(time.time() + int(resp.get("expires_in", 3600)))
-    if "refresh_token" in resp:
-        # Clerk may rotate refresh tokens; persist the new one if so.
-        creds["refresh_token"] = resp["refresh_token"]
-    _save_credentials(creds)
-    return creds
-
-
 def get_token():
-    """Return a valid Clerk OAuth access token. Refreshes silently when expiring soon."""
+    """Return a valid JWT. Re-runs the browser flow if the cached token is
+    expired — usually silent because the Clerk session cookie is still alive."""
     with _token_lock:
         creds = _load_credentials()
-        if not creds:
-            raise RuntimeError("Not logged in. Run: npx pluto-judge auth login")
-        if creds.get("expires_at", 0) < time.time() + 60:
-            try:
-                creds = _refresh_token(creds)
-            except HTTPError as e:
-                if e.code in (400, 401):
-                    raise RuntimeError("Login expired. Run: npx pluto-judge auth login") from e
-                raise
-        return creds["access_token"]
+        if creds and creds.get("expires_at", 0) > time.time() + 60:
+            return creds["access_token"]
+        return _login_unlocked()["access_token"]
+
+
+def force_login():
+    """Programmatic re-auth. Always opens the browser. Raises on failure.
+
+    Used by the server's 401-retry path to invalidate any cached/stale token
+    and pop a fresh broker round-trip. The token lock serialises concurrent
+    callers, so only one browser flow runs at a time."""
+    with _token_lock:
+        return _login_unlocked()
 
 
 def pluto_headers():
@@ -127,11 +101,11 @@ def agent_headers():
     return {"Authorization": f"Bearer {get_token()}"}
 
 
-# ── CLI subcommands (login / logout / status) ────────────────────────────
+# ── Browser flow ─────────────────────────────────────────────────────────
 
 
 class _CallbackHandler(http.server.BaseHTTPRequestHandler):
-    """One-shot loopback handler for the OAuth redirect."""
+    """One-shot loopback handler for the broker redirect."""
 
     captured: dict | None = None
     expected_state: str | None = None
@@ -148,14 +122,19 @@ class _CallbackHandler(http.server.BaseHTTPRequestHandler):
             _CallbackHandler.captured = {"error": "state_mismatch"}
             return
         if "error" in params:
-            self._reply(400, f"Auth failed: {params.get('error_description', params['error'])}")
+            self._reply(
+                400, f"Auth failed: {params.get('error_description', params['error'])}"
+            )
             _CallbackHandler.captured = {"error": params["error"]}
             return
-        if "code" not in params:
-            self._reply(400, "No code in response.")
-            _CallbackHandler.captured = {"error": "no_code"}
+        if "token" not in params:
+            self._reply(400, "No token in response.")
+            _CallbackHandler.captured = {"error": "no_token"}
             return
-        _CallbackHandler.captured = {"code": params["code"]}
+        _CallbackHandler.captured = {
+            "token": params["token"],
+            "expires_at": params.get("expires_at"),
+        }
         self._reply(200, "Logged in. You can close this tab.")
 
     def _reply(self, status, body):
@@ -164,27 +143,15 @@ class _CallbackHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(f"<html><body><h2>{body}</h2></body></html>".encode())
 
-    def log_message(self, *args, **kwargs):
+    def log_message(self, *_args: object, **_kwargs: object) -> None:
         return  # silence default access log
 
 
-def login():
-    if not CLIENT_ID:
-        print(
-            "Clerk OAuth client_id not configured.\n"
-            "Create an OAuth Application at dashboard.clerk.com (Pluto instance → OAuth Applications),\n"
-            "then set CLIENT_ID in src/auth.py or export PLUTO_CLERK_CLIENT_ID.",
-            file=sys.stderr,
-        )
-        return 1
-
-    verifier, challenge = _gen_pkce()
+def _login_unlocked():
+    """Run the broker flow, persist new credentials, return the dict.
+    Caller must hold `_token_lock`."""
     state = secrets.token_urlsafe(16)
 
-    # Clerk requires exact-match redirect URIs (no port wildcards), so we use
-    # a small registered set and try each in order. All of these must be added
-    # to the OAuth Application's allowed Redirect URIs in the Clerk dashboard.
-    REGISTERED_PORTS = (8765, 8766, 8767, 8768)
     server = None
     for port in REGISTERED_PORTS:
         try:
@@ -193,25 +160,20 @@ def login():
         except OSError:
             continue
     if server is None:
-        print(
+        raise RuntimeError(
             f"All registered loopback ports {REGISTERED_PORTS} are in use. "
-            "Free one and retry, or register additional ports in Clerk and add them here.",
-            file=sys.stderr,
+            "Free one and retry."
         )
-        return 1
+
     redirect_uri = f"http://127.0.0.1:{server.server_port}/callback"
     _CallbackHandler.expected_state = state
     _CallbackHandler.captured = None
 
-    auth_url = CLERK_AUTHORIZE_URL + "?" + urlencode({
-        "client_id": CLIENT_ID,
-        "response_type": "code",
-        "redirect_uri": redirect_uri,
-        "scope": "openid profile email offline_access",
-        "state": state,
-        "code_challenge": challenge,
-        "code_challenge_method": "S256",
-    })
+    auth_url = (
+        f"{PLUTO_API_BASE}/cli-auth"
+        f"?redirect_uri={quote(redirect_uri, safe='')}"
+        f"&state={state}"
+    )
 
     print("Opening browser to log in...")
     print(f"If the browser doesn't open, paste this URL:\n  {auth_url}\n")
@@ -225,62 +187,53 @@ def login():
 
     captured = _CallbackHandler.captured
     if not captured:
-        print("Timed out waiting for browser redirect.", file=sys.stderr)
-        return 1
+        raise RuntimeError("Timed out waiting for browser redirect.")
     if "error" in captured:
-        print(f"Login failed: {captured['error']}", file=sys.stderr)
-        return 1
+        raise RuntimeError(f"Login failed: {captured['error']}")
 
-    try:
-        token_resp = _form_post(CLERK_TOKEN_URL, {
-            "grant_type": "authorization_code",
-            "code": captured["code"],
-            "redirect_uri": redirect_uri,
-            "client_id": CLIENT_ID,
-            "code_verifier": verifier,
-        })
-    except HTTPError as e:
-        body = e.read().decode() if e.fp else str(e)
-        print(f"Token exchange failed (HTTP {e.code}): {body}", file=sys.stderr)
-        return 1
+    token = captured["token"]
+    payload = _decode_jwt_payload(token)
+
+    expires_at: int | None = None
+    raw_exp = captured.get("expires_at")
+    if raw_exp:
+        try:
+            expires_at = int(raw_exp)
+        except ValueError:
+            expires_at = None
+    if not expires_at:
+        exp_claim = payload.get("exp")
+        expires_at = int(exp_claim) if isinstance(exp_claim, (int, float)) else 0
 
     creds = {
-        "access_token": token_resp["access_token"],
-        "refresh_token": token_resp.get("refresh_token"),
-        "expires_at": int(time.time() + int(token_resp.get("expires_in", 3600))),
-        "token_type": token_resp.get("token_type", "Bearer"),
-        "scope": token_resp.get("scope", ""),
+        "access_token": token,
+        "expires_at": expires_at,
+        # Best-effort: present only if the Clerk JWT template emits an `email`
+        # claim. Falls back to empty string for `auth status` display.
+        "email": payload.get("email", ""),
     }
-
-    try:
-        req = Request(CLERK_USERINFO_URL)
-        req.add_header("Authorization", f"Bearer {creds['access_token']}")
-        req.add_header("User-Agent", _USER_AGENT)
-        with urlopen(req, timeout=10, context=_SSL_CTX) as resp:
-            info = json.loads(resp.read().decode())
-        creds["email"] = info.get("email", "")
-    except (HTTPError, OSError):
-        creds["email"] = ""
-
     _save_credentials(creds)
+    return creds
+
+
+# ── CLI subcommands (login / logout / status) ────────────────────────────
+
+
+def login():
+    try:
+        creds = force_login()
+    except RuntimeError as e:
+        print(str(e), file=sys.stderr)
+        return 1
     print(f"Logged in as {creds['email'] or '<unknown>'}.")
     print(f"Credentials stored at {CRED_PATH}.")
     return 0
 
 
 def logout():
-    creds = _load_credentials()
-    if not creds:
+    if not os.path.exists(CRED_PATH):
         print("Not logged in.")
         return 0
-    if creds.get("refresh_token") and CLIENT_ID:
-        try:
-            _form_post(CLERK_REVOKE_URL, {
-                "token": creds["refresh_token"],
-                "client_id": CLIENT_ID,
-            })
-        except (HTTPError, OSError):
-            pass  # best-effort revocation; the local file is what really matters
     try:
         os.unlink(CRED_PATH)
     except OSError:
