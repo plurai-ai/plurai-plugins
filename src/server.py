@@ -125,8 +125,8 @@ def http_stream(url, body, headers, timeout=300):
 
 # ── Pluto API endpoints + tool-flow state ─────────────────────────────────
 
-PLUTO_API = "https://pluto.plurai.ai/api/pluto"
-AGENT_API = "https://pluto.plurai.ai/api/agent/api/copilotkit"
+PLUTO_API = "https://pluto.stg.plurai.ai/api/pluto"
+AGENT_API = "https://pluto.stg.plurai.ai/api/agent/api/copilotkit"
 
 _agent_has_questions = False  # Set to True after pluto_send_message returns refinement questions
 _classifier_by_thread = {}    # Track classifier ID per thread: {thread_id: classifier_id}

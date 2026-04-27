@@ -26,7 +26,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 # Clerk OAuth 2.0 endpoints (https://clerk.plurai.ai/.well-known/openid-configuration).
-CLERK_ISSUER = "https://full-doe-63.clerk.accounts.dev" # "https://clerk.plurai.ai"
+CLERK_ISSUER = "https://clerk.stg.plurai.ai"
 CLERK_AUTHORIZE_URL = f"{CLERK_ISSUER}/oauth/authorize"
 CLERK_TOKEN_URL = f"{CLERK_ISSUER}/oauth/token"
 CLERK_USERINFO_URL = f"{CLERK_ISSUER}/oauth/userinfo"
@@ -35,7 +35,7 @@ CLERK_REVOKE_URL = f"{CLERK_ISSUER}/oauth/token/revoke"
 # Public Clerk OAuth Application client_id for pluto-judge. Set this constant once an OAuth
 # Application has been created in dashboard.clerk.com → Pluto instance → OAuth Applications.
 # Public client (no secret) — PKCE is mandatory. Override via env var for staging/dev.
-CLIENT_ID = os.environ.get("PLUTO_CLERK_CLIENT_ID", "")
+CLIENT_ID = os.environ.get("PLUTO_CLERK_CLIENT_ID", "Q8PUrXzINxDoqtnH")
 
 CRED_PATH = os.path.expanduser(
     os.environ.get("PLUTO_CREDENTIALS_PATH", "~/.config/pluto/credentials.json")
