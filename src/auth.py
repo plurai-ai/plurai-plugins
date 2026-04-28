@@ -2,8 +2,10 @@
 
 Sign-in goes through `${PLUTO_API_BASE}/cli-auth` — a webapp page hosted
 behind the Pluto Clerk session middleware that mints a session-template JWT
-(`aud: svc:pluto-agent`) and 302s it to a CLI loopback redirect. See RFC
-0001 (`docs/rfcs/0001-web-broker-cli-auth.md`).
+(`aud: svc:pluto-agent`) and POSTs it to a CLI loopback in the background.
+The page itself renders the success/error UI; nothing about the JWT ever
+appears in a URL, browser history, or referrer header. See RFC 0001
+(`docs/rfcs/0001-web-broker-cli-auth.md`).
 
 Self-contained — can be run standalone for testing:
 
@@ -26,7 +28,7 @@ import sys
 import threading
 import time
 import webbrowser
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import quote, urlparse
 
 # Webapp host. Broker page lives at `${PLUTO_API_BASE}/cli-auth`. API tools
 # in `src/server.py` derive their base URLs from the same env var so a single
@@ -104,44 +106,127 @@ def agent_headers():
 # ── Browser flow ─────────────────────────────────────────────────────────
 
 
+def _broker_origin() -> str:
+    parsed = urlparse(PLUTO_API_BASE)
+    if not parsed.scheme or not parsed.netloc:
+        raise RuntimeError(
+            f"PLUTO_API_BASE must be an absolute URL: {PLUTO_API_BASE!r}"
+        )
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+# Cap the JSON body the broker POSTs to a few KB. A real session-template JWT
+# is ~600–900 bytes; anything larger is malformed and we'd rather fail fast.
+_MAX_POST_BYTES = 8 * 1024
+
+
 class _CallbackHandler(http.server.BaseHTTPRequestHandler):
-    """One-shot loopback handler for the broker redirect."""
+    """One-shot loopback handler for the broker handoff.
+
+    The broker page (cross-origin, served from PLUTO_API_BASE) POSTs the
+    JWT here as JSON. We never accept the JWT via GET — putting it in a URL
+    would expose it to browser history, address-bar shoulder-surfing, and
+    any referrer leakage from the navigation. Two layers of access control:
+
+    - CORS `Origin` allowlist (single value derived from PLUTO_API_BASE) —
+      the browser will refuse to send a cross-origin POST without our
+      explicit OK in the preflight response.
+    - `state` parameter — generated fresh per login, known only to this
+      process and the broker page we just opened.
+    """
 
     captured: dict | None = None
     expected_state: str | None = None
+    allowed_origin: str = ""
 
-    def do_GET(self):
-        parsed = urlparse(self.path)
-        if parsed.path != "/callback":
-            self.send_response(404)
-            self.end_headers()
+    def do_OPTIONS(self) -> None:
+        if self.path != "/callback":
+            self._empty(404)
             return
-        params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
-        if params.get("state") != _CallbackHandler.expected_state:
-            self._reply(400, "State mismatch.")
-            _CallbackHandler.captured = {"error": "state_mismatch"}
+        origin = self.headers.get("Origin", "")
+        if not self.allowed_origin or origin != self.allowed_origin:
+            self._empty(403)
             return
-        if "error" in params:
-            self._reply(
-                400, f"Auth failed: {params.get('error_description', params['error'])}"
-            )
-            _CallbackHandler.captured = {"error": params["error"]}
-            return
-        if "token" not in params:
-            self._reply(400, "No token in response.")
-            _CallbackHandler.captured = {"error": "no_token"}
-            return
-        _CallbackHandler.captured = {
-            "token": params["token"],
-            "expires_at": params.get("expires_at"),
-        }
-        self._reply(200, "Logged in. You can close this tab.")
-
-    def _reply(self, status, body):
-        self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Max-Age", "60")
+        self.send_header("Vary", "Origin")
         self.end_headers()
-        self.wfile.write(f"<html><body><h2>{body}</h2></body></html>".encode())
+
+    def do_POST(self) -> None:
+        if self.path != "/callback":
+            self._empty(404)
+            return
+        origin = self.headers.get("Origin", "")
+        if not self.allowed_origin or origin != self.allowed_origin:
+            self._json(403, {"error": "forbidden_origin"}, allow_origin=False)
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._json(400, {"error": "invalid_body"})
+            return
+        if length <= 0 or length > _MAX_POST_BYTES:
+            self._json(400, {"error": "invalid_body"})
+            return
+
+        body = self.rfile.read(length)
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._json(400, {"error": "invalid_body"})
+            return
+        if not isinstance(payload, dict):
+            self._json(400, {"error": "invalid_body"})
+            return
+
+        if payload.get("state") != _CallbackHandler.expected_state:
+            _CallbackHandler.captured = {"error": "state_mismatch"}
+            self._json(400, {"error": "state_mismatch"})
+            return
+
+        if "error" in payload:
+            err = str(payload.get("error") or "unknown_error")
+            _CallbackHandler.captured = {"error": err}
+            self._json(200, {"ok": True})
+            return
+
+        token = payload.get("token")
+        if not isinstance(token, str) or not token:
+            _CallbackHandler.captured = {"error": "no_token"}
+            self._json(400, {"error": "no_token"})
+            return
+
+        _CallbackHandler.captured = {
+            "token": token,
+            "expires_at": payload.get("expires_at"),
+        }
+        self._json(200, {"ok": True})
+
+    def do_GET(self) -> None:
+        # No tokens are accepted via GET. Keep responses content-free so a
+        # mistakenly-pasted loopback URL can't render attacker-controlled
+        # text in the user's browser.
+        self._empty(404)
+
+    def _json(self, status: int, body: dict, *, allow_origin: bool = True) -> None:
+        encoded = json.dumps(body).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        if allow_origin and self.allowed_origin:
+            self.send_header("Access-Control-Allow-Origin", self.allowed_origin)
+            self.send_header("Vary", "Origin")
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def _empty(self, status: int) -> None:
+        self.send_response(status)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def log_message(self, *_args: object, **_kwargs: object) -> None:
         return  # silence default access log
@@ -168,6 +253,7 @@ def _login_unlocked():
     redirect_uri = f"http://127.0.0.1:{server.server_port}/callback"
     _CallbackHandler.expected_state = state
     _CallbackHandler.captured = None
+    _CallbackHandler.allowed_origin = _broker_origin()
 
     auth_url = (
         f"{PLUTO_API_BASE}/cli-auth"

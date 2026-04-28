@@ -13,10 +13,17 @@
       must come from a real HTTP header. Confirm exact Clerk hostnames against
       the staging Network panel before locking the prod CSP.
     -->
+    <!--
+      connect-src must include the CLI loopback origins so the JWT handoff
+      `fetch` POST is allowed. Keep this list aligned with REGISTERED_PORTS in
+      src/auth.py and ALLOWED_PORTS in src/validateParams.ts. Both 127.0.0.1
+      and localhost are listed because either may be presented by the URL
+      parser as the request origin depending on the redirect_uri the CLI sent.
+    -->
     <meta http-equiv="Content-Security-Policy"
           content="default-src 'none';
                    script-src 'self' https://*.clerk.accounts.dev https://*.clerk.com https://*.clerk.dev;
-                   connect-src 'self' https://*.clerk.accounts.dev https://*.clerk.com https://*.clerk.dev https://clerk-telemetry.com;
+                   connect-src 'self' https://*.clerk.accounts.dev https://*.clerk.com https://*.clerk.dev https://clerk-telemetry.com http://127.0.0.1:8765 http://127.0.0.1:8766 http://127.0.0.1:8767 http://127.0.0.1:8768 http://localhost:8765 http://localhost:8766 http://localhost:8767 http://localhost:8768;
                    img-src 'self' data: https://img.clerk.com;
                    style-src 'self' 'unsafe-inline';
                    font-src 'self' data:;

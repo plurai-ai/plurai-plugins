@@ -11,11 +11,12 @@ Replace the CLI's Clerk OAuth 2.0 Application + PKCE flow with a single
 HTML page on the Pluto webapp that acts as a token broker. The page sits
 behind the existing Clerk session middleware, calls
 `Clerk.session.getToken({template: 'pluto-agent-authz'})` in the browser, and
-`302`s the resulting JWT to a CLI loopback redirect. The CLI uses the
-JWT as `Authorization: Bearer …` for API calls. **No new backend
-endpoints, no DB changes, no new auth-verifier work.** When the JWT
-expires (10 min), the CLI re-runs the broker flow on the next 401 — silent
-to the user as long as the Clerk browser session is still alive.
+`fetch`-POSTs the resulting JWT to a CLI loopback in the background while
+itself rendering the success/error UI. The CLI uses the JWT as
+`Authorization: Bearer …` for API calls. **No new backend endpoints, no
+DB changes, no new auth-verifier work.** When the JWT expires (10 min),
+the CLI re-runs the broker flow on the next 401 — silent to the user as
+long as the Clerk browser session is still alive.
 
 ## 2. Background
 
@@ -71,7 +72,7 @@ that boundary.
 ### Browser flow
 
 1. CLI generates `state = secrets.token_urlsafe(16)`.
-2. CLI binds a loopback HTTP server to one of `REGISTERED_PORTS = (8765, 8766, 8767, 8768)` (existing scaffolding at `src/auth.py:187`). One-shot handler accepts `GET /callback`.
+2. CLI binds a loopback HTTP server to one of `REGISTERED_PORTS = (8765, 8766, 8767, 8768)`. Handler accepts `OPTIONS /callback` (CORS preflight) and `POST /callback` (JSON handoff). **No GET path accepts a token** — this is intentional, see §8.
 3. CLI opens the user's browser to:
    ```
    ${PLUTO_API_BASE}/cli-auth?redirect_uri=http://127.0.0.1:PORT/callback&state=<state>
@@ -80,10 +81,10 @@ that boundary.
 5. The page:
    - Validates `redirect_uri` against the allowlist (loopback only).
    - Calls `Clerk.session.getToken({template: 'pluto-agent-authz'})` — this is the same call the regular web app already makes for its own API requests.
-   - Optionally renders a one-time consent screen ("Authorize the pluto-judge CLI for <org>?"). Possibly skipped if the user just clicked into `/cli-auth` deliberately — see open questions §9.
    - Reads `exp` from the JWT.
-   - `302`s to `${redirect_uri}?state=<state>&token=<jwt>&expires_at=<epoch>`.
-6. CLI loopback handler validates `state`, captures `token` + `expires_at`, replies with a "you can close this tab" page, and `server_close()`s.
+   - **`fetch`-POSTs `{state, token, expires_at}` as JSON** to `${redirect_uri}` (`mode: 'cors'`, `credentials: 'omit'`, `referrerPolicy: 'no-referrer'`).
+   - Renders an in-page "Logged in. You can close this tab." status — the browser never navigates with the JWT.
+6. CLI loopback handler verifies `Origin` matches the broker, validates `state`, captures `token` + `expires_at`, replies `200 {ok: true}` (with the CORS allowlist headers), and `server_close()`s.
 7. CLI persists `{access_token, expires_at, email}` to `~/.config/pluto/credentials.json` (`0600`).
 
 ### Token use
@@ -99,8 +100,8 @@ Pluto webapp adds **one** surface. Hosts: `https://pluto.plurai.ai` (prod), `htt
 ### `GET /cli-auth?redirect_uri&state`
 
 - **Auth:** existing Clerk session middleware. If unauthenticated → Clerk sign-in → bounce back to `/cli-auth` with the same query string.
-- **Validation:** `redirect_uri` MUST start with `http://127.0.0.1:` (or `http://localhost:`). Reject otherwise with a 400 page.
-- **Behavior:** call `Clerk.session.getToken({template: 'pluto-agent-authz'})`, then `302` to `${redirect_uri}?state=${state}&token=${jwt}&expires_at=${exp}`.
+- **Validation:** `redirect_uri` MUST be `http://127.0.0.1:<allowed-port>/callback` or `http://localhost:<allowed-port>/callback` for `port ∈ REGISTERED_PORTS`. Reject otherwise with a 400 page.
+- **Behavior:** call `Clerk.session.getToken({template: 'pluto-agent-authz'})`, then `fetch`-POST `{state, token, expires_at}` as JSON to `redirect_uri`. Render the result inline; never navigate the browser with the JWT.
 - **No persistence** beyond what Clerk already does for the user's session.
 
 That's the entire backend delta. No `/api/cli-auth/*` endpoints, no DB rows, no new tables.
@@ -142,10 +143,15 @@ This RFC does not ship code. A follow-up plan will:
 
 ## 8. Security
 
-- **Token at rest (CLI):** `~/.config/pluto/credentials.json`, file `0600`, parent dir `0700` (already enforced at `src/auth.py:73`). Token is a ~10-min JWT — short-lived even if leaked.
-- **Loopback:** bind to `127.0.0.1` only (existing behavior at `src/auth.py:191`); validate `state`; one-shot handler.
+- **Token never appears in a URL.** The broker hands the JWT to the CLI via a background `fetch` POST with a JSON body, not a 302 redirect. Consequence: no browser-history entry, no address-bar exposure, no leakage via `Referer` on the navigation, no token surviving in `location.href` if the CLI tab is later inspected. This is the central hardening over the original RFC sketch.
+- **Token at rest (CLI):** `~/.config/pluto/credentials.json`, file `0600`, parent dir `0700`. Token is a ~10-min JWT — short-lived even if leaked.
+- **Loopback:** bind to `127.0.0.1` only; one-shot handler accepts `OPTIONS` and `POST` on `/callback` only; `GET` returns 404 with no body.
+- **Loopback authentication, two layers:**
+  - CORS `Origin` allowlist: handler responds to the preflight only when `Origin` equals `${PLUTO_API_BASE}` exactly. Browsers refuse to send the cross-origin POST without this OK.
+  - `state` parameter generated per login, known only to this CLI process and the broker page it just opened.
 - **Redirect-URI allowlist (server-side):** only `http://127.0.0.1:<port>/callback` and/or `http://localhost:<port>/callback` for `port ∈ REGISTERED_PORTS`.
-- **No long-lived secrets on disk** — the worst case for credential leakage is a 10-min window before the cached JWT expires.
+- **CSP `connect-src`:** the broker page's CSP must list each loopback origin (`http://127.0.0.1:<port>` and `http://localhost:<port>` for every registered port) so the handoff `fetch` is allowed. `form-action 'none'` and `base-uri 'none'` close off other ways the page could exfiltrate the token.
+- **No long-lived secrets on disk** — worst-case credential leakage window is 10 minutes (JWT lifetime).
 - **Logout:** `auth logout` deletes the local credentials file. Server-side has nothing to revoke (no persistence).
 - **Token theft mitigation:** because the broker only mints session-template tokens (the same ones the regular web app produces), Clerk's existing rate-limits, anomaly detection, and session controls all apply uniformly. No new attack surface.
 

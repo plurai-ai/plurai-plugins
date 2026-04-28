@@ -11,8 +11,10 @@ A Vite + React single-page app whose only job is to:
    Clerk's hosted sign-in if not).
 3. Call `clerk.session.getToken({ template: 'pluto-agent-authz' })` to mint a
    JWT with `aud: svc:pluto-agent`.
-4. Redirect the browser to
-   `${redirect_uri}?state=<state>&token=<jwt>&expires_at=<epoch>`.
+4. **`fetch`-POST `{state, token, expires_at}` as JSON to `${redirect_uri}`** in
+   the background, then render an in-page success or error message. The
+   browser never navigates with the JWT, so the token never appears in the
+   address bar, browser history, or any referrer header.
 
 Because every input is attacker-controllable and the output is a bearer
 token, every error path is a credential-leak path. This page is hardened
@@ -54,7 +56,9 @@ npm run test:flow
 This script ([`test-flow.js`](test-flow.js)) stands in for the CLI: starts
 a loopback server on `127.0.0.1:8765/callback`, opens the broker page in
 your default browser with a random `state`, and prints the captured JWT +
-decoded payload when the redirect arrives.
+decoded payload when the broker POSTs the handoff. Mirrors the CORS
+preflight / JSON-body behaviour in [`../../src/auth.py`](../../src/auth.py)
+exactly.
 
 ## Run the unit tests
 
@@ -113,17 +117,26 @@ The short version:
 
 ### What this page defends against
 
+- **Token in URL / browser history / referrer.** Eliminated by design — the
+  handoff is a same-page background `fetch` POST with a JSON body, not a
+  navigation. The browser never resolves a URL containing the JWT, so
+  there is no history entry, no address-bar exposure, and no `Referer`
+  header on a subsequent navigation.
 - **Open redirect / token exfil.** Strict validator: hardcoded host
   allowlist (`127.0.0.1`, `localhost`), port allowlist (`8765–8768`), exact
   `/callback` path, no userinfo, no pre-existing query/fragment, no
   duplicate keys, length caps, `state` charset (`[A-Za-z0-9_-]{16,256}`).
   See [`src/validateParams.ts`](src/validateParams.ts).
+- **CSRF against the loopback.** The CLI handler responds to the CORS
+  preflight only when the `Origin` header equals the configured broker
+  origin (`PLUTO_API_BASE`). `state` is a second factor — generated per
+  login, known only to the CLI process and the broker page it opened.
 - **Reflected attacker text in error UI.** Errors are fixed strings; raw
   attacker input only goes to `console.warn` in dev.
 - **Token leakage into telemetry / DOM / state.** Token lives in `useRef`,
-  cleared immediately after redirect. Never `useState`'d, rendered, or
-  logged. Global `error` / `unhandledrejection` listeners suppress bubbling
-  ([`src/main.tsx`](src/main.tsx)).
+  cleared immediately after the loopback POST resolves. Never
+  `useState`'d, rendered, or logged. Global `error` / `unhandledrejection`
+  listeners suppress bubbling ([`src/main.tsx`](src/main.tsx)).
 - **bfcache replay on the back button.** `sessionStorage` completion flag,
   scoped to `state`. Belt: server-side `Cache-Control: no-store`.
 - **React StrictMode double-mint.** `useRef` started-flag.
@@ -136,10 +149,11 @@ The short version:
   section below).
 - **HTTPS downgrade.** Production build refuses to run on `http:`.
 - **Stale Clerk session at `getToken` time.** `clerk.session` re-checked
-  before the call; closed-enum error redirect if missing.
-- **CLI hang on broker failure.** All post-validation failures redirect
-  with `?error=<code>&error_description=<short>`, where `<code>` ∈
-  `{mint_failed, session_expired}`.
+  before the call; closed-enum error POST if missing.
+- **CLI hang on broker failure.** All post-validation failures POST
+  `{state, error: <code>, error_description: <short>}` to the loopback,
+  where `<code>` ∈ `{mint_failed, session_expired}`. If the loopback is
+  gone (CLI exited), the CLI's 5-minute deadline still recovers.
 
 ### Required server-side headers (apply when hosting at /cli-auth)
 
@@ -147,7 +161,7 @@ The short version:
 Content-Security-Policy:
   default-src 'none';
   script-src 'self' https://*.clerk.accounts.dev https://*.clerk.com https://*.clerk.dev;
-  connect-src 'self' https://*.clerk.accounts.dev https://*.clerk.com https://*.clerk.dev https://clerk-telemetry.com;
+  connect-src 'self' https://*.clerk.accounts.dev https://*.clerk.com https://*.clerk.dev https://clerk-telemetry.com http://127.0.0.1:8765 http://127.0.0.1:8766 http://127.0.0.1:8767 http://127.0.0.1:8768 http://localhost:8765 http://localhost:8766 http://localhost:8767 http://localhost:8768;
   img-src 'self' data: https://img.clerk.com;
   style-src 'self' 'unsafe-inline';
   font-src 'self' data:;
@@ -179,31 +193,34 @@ against the staging Network panel.
 
 ### Residual risks (not fixable from this page)
 
-- **JWT in browser history of the loopback URL.** The CLI's success-page
-  HTML should run `history.replaceState(null, '', '/callback')` immediately
-  on load. Mitigated by the 10-min token lifetime.
-- **JWT in CLI loopback access log.** The CLI's `BaseHTTPRequestHandler`
-  must override `log_message` to no-op, or strip the query string.
-- **Browser extensions** with host permissions on `pluto.plurai.ai/*` can
-  read `document.URL`. Use a clean profile when running `auth login` if
-  high-privilege extensions are installed.
+- **Browser extensions** with `pluto.plurai.ai/*` host permissions can
+  intercept the in-flight POST body via `webRequest`/`declarativeNetRequest`
+  before it leaves the page. Use a clean browser profile when running
+  `auth login` if high-privilege extensions are installed.
 - **Compromised Clerk JS / CDN.** Subscribe to Clerk security advisories.
 - **Local malicious process binding `127.0.0.1:8765` before the CLI does.**
-  CLI side defends with `state`; the legitimate side's loopback rejects
-  on state mismatch.
+  CLI side defends with `state` and the CORS-`Origin` allowlist; the
+  legitimate side's loopback rejects on either mismatch.
+- **Service workers in scope of `pluto.plurai.ai`** could observe the POST
+  body. The Pluto webapp must not register a service worker that claims
+  scope over `/cli-auth`.
 
 ### Coordination items for CLI side (`src/auth.py`)
 
-These are not broker-page changes but are required for the hardening to be
-end-to-end complete:
+The CLI half of this contract is implemented in
+[`../../src/auth.py`](../../src/auth.py). Required behaviour:
 
-1. Recognise `?error=<code>` on `/callback` and surface a friendly message.
-2. Override `BaseHTTPRequestHandler.log_message` so `?token=` doesn't go to
-   stderr.
-3. Success-page HTML scrubs the URL bar via `history.replaceState`.
-4. Validate `Sec-Fetch-Mode: navigate` + `Sec-Fetch-Dest: document` on
-   `/callback` to defang any local cross-page `fetch()` exfil.
+1. Handle `OPTIONS /callback` (CORS preflight) and `POST /callback` (JSON
+   handoff). Return `404` for `GET` so a token in the URL is never accepted.
+2. Compare the `Origin` header strictly against `PLUTO_API_BASE`'s origin
+   on both `OPTIONS` and `POST`. No wildcards, no `null` allowed.
+3. Validate `state` on every POST. On mismatch, capture an error and
+   respond `400` — do not leak whether the state was wrong vs. unset.
+4. `BaseHTTPRequestHandler.log_message` overridden to no-op (defence in
+   depth — the JWT is in the body, not the URL, so even default access logs
+   wouldn't expose it, but suppression keeps logs clean).
 5. Bind only `127.0.0.1`, never `localhost` / `0.0.0.0` / `::`.
+6. Cap `Content-Length` to a few KB before reading the body.
 
 ## Porting the page into the prod Pluto webapp
 
@@ -222,8 +239,8 @@ Must be re-asserted at the new layer:
 - **Service worker bypass** for `/cli-auth` if the parent webapp registers
   one.
 - **Disable RUM / analytics / session replay on `/cli-auth`.** Sentry,
-  Datadog, FullStory, LogRocket, Mixpanel, GA4, etc. — each captures URLs;
-  the broker URL contains the token between mint and redirect.
+  Datadog, FullStory, LogRocket, Mixpanel, GA4, etc. — most also intercept
+  `fetch` requests and bodies, which on this page contain the JWT.
 - **No layout chrome** — don't render the webapp's nav/sidebar/footer on
   this route.
 - **Clerk Authorized origins** — add the prod and staging webapp origins
@@ -240,7 +257,7 @@ test/cli-auth-broker/
 ├── index.html              # CSP meta, robots, referrer
 ├── src/
 │   ├── main.tsx            # Frame-buster, HTTPS guard, error boundary, ClerkProvider
-│   ├── App.tsx             # Phase state machine, ref-based token, error redirect
+│   ├── App.tsx             # Phase state machine, ref-based token, fetch-POST handoff
 │   ├── validateParams.ts   # Strict redirect_uri/state validator
 │   ├── decodeJwt.ts        # Defensive JWT exp parser
 │   └── vite-env.d.ts

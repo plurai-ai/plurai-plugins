@@ -1,17 +1,17 @@
 // IMPORTANT — security invariants for this file:
 //   - Never store the JWT in React state. It lives in a useRef and is cleared
-//     immediately after the redirect navigation.
+//     immediately after the loopback POST.
 //   - Never console.log the token or any prefix of it.
-//   - Never render the token, the redirect_uri, the state, or any decoded
-//     payload into JSX. Status text is from a fixed set; user email is
-//     allowed because the user is signing themselves in.
+//   - Never put the token, the redirect_uri, the state, or any decoded payload
+//     into JSX, the URL, or window.location. The handoff to the CLI is a
+//     background `fetch` POST — the browser never navigates with the JWT, so
+//     it never lands in history, the address bar, or a referrer header.
 //   - Errors reported to the CLI use a closed enum (`mint_failed`,
 //     `session_expired`). Never include `e.message` or stack traces.
-//   - Errors that happen BEFORE redirect_uri is validated must NOT redirect
-//     anywhere — render a static page and rely on the CLI's timeout.
+//   - Errors that happen BEFORE redirect_uri is validated must NOT contact
+//     the loopback — render a static page and rely on the CLI's timeout.
 //
-// See /Users/ben/workspace/pluto-judge/docs/rfcs/0001-web-broker-cli-auth.md
-// and the hardening plan in /Users/ben/.claude/plans/.
+// See /Users/ben/workspace/pluto-judge/docs/rfcs/0001-web-broker-cli-auth.md.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth, useClerk, useUser } from "@clerk/clerk-react";
@@ -25,7 +25,8 @@ type Phase =
   | "loading-clerk"
   | "signing-in"
   | "minting"
-  | "redirecting"
+  | "posting"
+  | "completed"
   | "already-completed"
   | "error";
 
@@ -38,6 +39,7 @@ const ERROR_DESCRIPTIONS: Record<ErrorCode, string> = {
 const STATUS_LOADING = "Loading…";
 const STATUS_SIGNING_IN = "Redirecting to sign-in…";
 const STATUS_AUTHORISING = "Authorising…";
+const STATUS_POSTING = "Handing off to the CLI…";
 const STATUS_DONE = "Logged in. You can close this tab.";
 const STATUS_ALREADY = "This sign-in already completed. Close this tab and re-run pluto auth login.";
 const STATUS_ERROR = "Sign-in failed. Close this tab and try pluto auth login again.";
@@ -46,12 +48,27 @@ function completedKey(state: string): string {
   return `pluto-broker-completed:${state}`;
 }
 
-function buildErrorRedirect(redirectUrl: URL, state: string, code: ErrorCode): string {
-  const target = new URL(redirectUrl.toString());
-  target.searchParams.set("state", state);
-  target.searchParams.set("error", code);
-  target.searchParams.set("error_description", ERROR_DESCRIPTIONS[code]);
-  return target.toString();
+// Send the handoff payload to the CLI loopback. We POST instead of redirecting
+// so the JWT never leaves the request body — no browser history entry, no
+// referrer, no address-bar exposure. Returns true on a 2xx response from the
+// loopback. CORS is enforced by the CLI's `Access-Control-Allow-Origin`
+// allowlist, and the CLI cross-checks `state` defensively.
+async function postHandoff(redirectUrl: URL, body: Record<string, unknown>): Promise<boolean> {
+  try {
+    const res = await fetch(redirectUrl.toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      credentials: "omit",
+      cache: "no-store",
+      mode: "cors",
+      redirect: "error",
+      referrerPolicy: "no-referrer",
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 export function App() {
@@ -88,9 +105,22 @@ export function App() {
     if (startedRef.current) return;
     startedRef.current = true;
 
+    // Best-effort error notification to the CLI loopback. Same channel as
+    // the success path (POST, no redirect) so the error never appears in the
+    // URL. Fire-and-forget — if the loopback is gone, the CLI's 5-minute
+    // timeout recovers. Always sets the phase to "error" synchronously.
+    const reportError = (code: ErrorCode): void => {
+      setPhase("error");
+      void postHandoff(validation.redirectUrl, {
+        state: validation.state,
+        error: code,
+        error_description: ERROR_DESCRIPTIONS[code],
+      });
+    };
+
     const session = clerk.session;
     if (!session) {
-      reportError(validation.redirectUrl, validation.state, "session_expired");
+      reportError("session_expired");
       return;
     }
 
@@ -102,32 +132,36 @@ export function App() {
       try {
         token = await session.getToken({ template: JWT_TEMPLATE });
       } catch {
-        if (!cancelled) reportError(validation.redirectUrl, validation.state, "mint_failed");
+        if (!cancelled) reportError("mint_failed");
         return;
       }
       if (cancelled) return;
       if (!token) {
-        reportError(validation.redirectUrl, validation.state, "mint_failed");
+        reportError("mint_failed");
         return;
       }
 
       const exp = decodeJwtExp(token);
       if (exp == null) {
-        reportError(validation.redirectUrl, validation.state, "mint_failed");
+        reportError("mint_failed");
         return;
       }
 
       tokenRef.current = token;
-      const target = new URL(validation.redirectUrl.toString());
-      target.searchParams.set("state", validation.state);
-      target.searchParams.set("token", token);
-      target.searchParams.set("expires_at", String(exp));
-
-      sessionStorage.setItem(completedKey(validation.state), "1");
-      setPhase("redirecting");
-      const url = target.toString();
+      setPhase("posting");
+      const ok = await postHandoff(validation.redirectUrl, {
+        state: validation.state,
+        token,
+        expires_at: exp,
+      });
       tokenRef.current = null;
-      window.location.replace(url);
+      if (cancelled) return;
+      if (!ok) {
+        setPhase("error");
+        return;
+      }
+      sessionStorage.setItem(completedKey(validation.state), "1");
+      setPhase("completed");
     })();
 
     return () => {
@@ -187,8 +221,11 @@ function Status({
   if (phase === "already-completed") {
     return <p style={{ marginTop: "1rem" }}>{STATUS_ALREADY}</p>;
   }
-  if (phase === "redirecting") {
+  if (phase === "completed") {
     return <p style={{ marginTop: "1rem" }}>{STATUS_DONE}</p>;
+  }
+  if (phase === "posting") {
+    return <p style={{ marginTop: "1rem" }}>{STATUS_POSTING}</p>;
   }
   if (phase === "minting") {
     return (
@@ -203,6 +240,3 @@ function Status({
   return <p style={{ marginTop: "1rem" }}>{STATUS_LOADING}</p>;
 }
 
-function reportError(redirectUrl: URL, state: string, code: ErrorCode): void {
-  window.location.replace(buildErrorRedirect(redirectUrl, state, code));
-}
