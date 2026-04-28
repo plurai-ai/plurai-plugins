@@ -22,7 +22,6 @@ from auth import agent_headers, pluto_headers
 
 def _write_msg(obj):
     out = json.dumps(obj)
-    # Write as JSON line (Claude Code uses JSON-line protocol)
     sys.stdout.buffer.write(out.encode())
     sys.stdout.buffer.write(b"\n")
     sys.stdout.buffer.flush()
@@ -106,6 +105,43 @@ def read_message():
 
 _SSL_CTX = ssl.create_default_context()
 
+_ERROR_BODY_MAX_BYTES = 2000
+_ERROR_REDACT_KEYS = ("authorization", "token", "access_token", "secret", "api_key")
+
+
+def _safe_error_body(exc: HTTPError) -> str:
+    """Read an HTTPError body for client display: truncate and redact secrets.
+
+    The MCP error path forwards backend bodies into the model's context. Caps
+    length and best-effort redacts JSON values whose keys look like secrets so
+    a misbehaving backend can't leak them into the conversation.
+    """
+    try:
+        raw = exc.read() if exc.fp else b""
+    except Exception:
+        return str(exc)
+    body = raw[:_ERROR_BODY_MAX_BYTES].decode("utf-8", errors="replace")
+    truncated = len(raw) > _ERROR_BODY_MAX_BYTES
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        return body + ("…[truncated]" if truncated else "")
+    _redact(parsed)
+    out = json.dumps(parsed)
+    return out + ("…[truncated]" if truncated else "")
+
+
+def _redact(node):
+    if isinstance(node, dict):
+        for k in list(node.keys()):
+            if isinstance(k, str) and k.lower() in _ERROR_REDACT_KEYS:
+                node[k] = "[redacted]"
+            else:
+                _redact(node[k])
+    elif isinstance(node, list):
+        for item in node:
+            _redact(item)
+
 
 def _http_request_raw(method, url, body, headers, timeout):
     data = json.dumps(body).encode() if body else None
@@ -118,8 +154,9 @@ def _http_request_raw(method, url, body, headers, timeout):
 
 
 def http_request(method, url, body=None, headers_fn=None, timeout=30):
-    """Make an HTTP request, return parsed JSON. On 401, re-auth via the
-    broker (auth.force_login) and retry once with freshly-built headers."""
+    """Make an HTTP request, return parsed JSON. On 401, call
+    `auth.force_login()` (re-auth path varies by backend) and retry once
+    with freshly-built headers."""
     headers = headers_fn() if headers_fn else {}
     try:
         return _http_request_raw(method, url, body, headers, timeout)
@@ -150,8 +187,9 @@ def _http_stream_raw(url, body, headers, timeout):
 
 
 def http_stream(url, body, headers_fn, timeout=300):
-    """POST and stream SSE lines. On 401, re-auth via the broker and retry
-    once with freshly-built headers."""
+    """POST and stream SSE lines. On 401, call `auth.force_login()`
+    (re-auth path varies by backend) and retry once with freshly-built
+    headers."""
     try:
         return _http_stream_raw(url, body, headers_fn(), timeout)
     except HTTPError as e:
@@ -166,14 +204,23 @@ def http_stream(url, body, headers_fn, timeout=300):
 PLUTO_API_BASE = os.environ.get("PLUTO_API_BASE", "https://pluto.stg.plurai.ai")
 PLUTO_API = f"{PLUTO_API_BASE}/api/pluto"
 AGENT_API = f"{PLUTO_API_BASE}/api/agent/api/copilotkit"
+# Public-facing URLs surfaced back to the user. Default to the same host as
+# the API; override via env if the dashboard / inference host differ.
+DASHBOARD_BASE = os.environ.get("PLUTO_DASHBOARD_BASE", PLUTO_API_BASE).rstrip("/")
+RUN_BASE = os.environ.get(
+    "PLUTO_RUN_BASE",
+    "https://run.plurai.ai"
+    if "stg" not in PLUTO_API_BASE
+    else "https://run.stg.plurai.ai",
+).rstrip("/")
 
 _agent_has_questions = (
     False  # Set to True after pluto_send_message returns refinement questions
 )
 _classifier_by_thread = {}  # Track classifier ID per thread: {thread_id: classifier_id}
 
-# Auth (login/logout/status, token caching, PKCE flow) lives in src/auth.py.
-# This file imports `pluto_headers` and `agent_headers` from it; tool calls below use those.
+# Auth (login/logout/status, token caching, backend dispatch) lives in
+# src/auth.py. Tool calls below use `pluto_headers` / `agent_headers`.
 
 # ── Tool implementations ───────────────────────────────────────────────────
 
@@ -230,6 +277,8 @@ def tool_start_judge(args):
         body={"workflow": "with-data"},
         headers_fn=pluto_headers,
     )
+    if "id" not in thread and "items" in thread:
+        thread = thread["items"][0]
     thread_id = thread["id"]
     try:
         http_request(
@@ -238,8 +287,8 @@ def tool_start_judge(args):
             body={"name": name},
             headers_fn=pluto_headers,
         )
-    except Exception:
-        pass
+    except (HTTPError, OSError) as e:
+        _log.warning("Failed to rename thread %s to %r: %s", thread_id, name, e)
 
     # Step 2: Send task description to agent
     payload = {
@@ -276,14 +325,13 @@ def tool_start_judge(args):
             break
 
     # Step 3: Enable pluto_ask_user, reset classifier from previous thread
-    global _agent_has_questions, _start_judge_used
+    global _agent_has_questions
     _agent_has_questions = True
-    _start_judge_used = True
 
     return {
         "thread_id": thread_id,
         "example_set_id": thread.get("exampleSetId", ""),
-        "url": f"https://pluto.plurai.ai/thread/{thread_id}",
+        "url": f"{DASHBOARD_BASE}/thread/{thread_id}",
         "agent_response": agent_response,
         "action_required": "PRESENT_QUESTIONS_TO_USER",
         "instructions": (
@@ -311,9 +359,6 @@ def tool_upload_data(args):
     return {"status": "uploaded", "count": len(records), "source": source}
 
 
-_start_judge_used = False  # Track if pluto_start_judge was called
-
-
 def _check_optimization_status(thread_id):
     """Check if optimization is already done or in progress. Returns a result dict or None."""
     classifier_id = _classifier_by_thread.get(thread_id)
@@ -324,62 +369,66 @@ def _check_optimization_status(thread_id):
         classifier = http_request(
             "GET", f"{PLUTO_API}/classifiers/{classifier_id}", headers_fn=pluto_headers
         )
-        slug = classifier["slug"]
-        version = classifier.get("defaultVersion", {}).get("number", "1.0.0")
+    except HTTPError as e:
+        if e.code == 404:
+            return None
+        raise
+    slug = classifier["slug"]
+    version = classifier.get("defaultVersion", {}).get("number", "1.0.0")
 
-        # Try to get optimization results (UUID first, then slug)
-        opt = None
-        for identifier in [classifier_id, slug]:
-            try:
-                opt = http_request(
-                    "GET",
-                    f"{PLUTO_API}/classifiers/{identifier}/versions/{version}/optimization",
-                    headers_fn=pluto_headers,
-                )
-                break  # Got results, stop trying
-            except HTTPError as e:
-                if e.code == 404:
-                    continue
-                raise
+    # Try to get optimization results (UUID first, then slug). 404 from both
+    # means "no optimization run yet" — fall through. Anything else propagates
+    # so the caller sees the real failure instead of a fake "send to agent".
+    opt = None
+    for identifier in [classifier_id, slug]:
+        try:
+            opt = http_request(
+                "GET",
+                f"{PLUTO_API}/classifiers/{identifier}/versions/{version}/optimization",
+                headers_fn=pluto_headers,
+            )
+            break
+        except HTTPError as e:
+            if e.code == 404:
+                continue
+            raise
 
-        if opt:
-            baseline = opt.get("baseline", {})
-            optimized = opt.get("optimized", {})
+    if opt:
+        baseline = opt.get("baseline", {})
+        optimized = opt.get("optimized", {})
 
-            if optimized and optimized.get("accuracy") is not None:
-                return {
-                    "status": "already_optimized",
-                    "message": "Optimization was already completed. Here are the results.",
-                    "classifier_id": classifier_id,
-                    "slug": slug,
-                    "version": version,
-                    "endpoint_url": f"https://run.plurai.ai/ioa/v1/{slug}/{version}",
-                    "dashboard_url": f"https://pluto.plurai.ai/classifier/{slug}/{version}",
-                    "baseline": {
-                        "accuracy": baseline.get("accuracy"),
-                        "precision": baseline.get("precision"),
-                        "recall": baseline.get("recall"),
-                    },
-                    "optimized": {
-                        "accuracy": optimized.get("accuracy"),
-                        "precision": optimized.get("precision"),
-                        "recall": optimized.get("recall"),
-                    },
-                }
-            elif baseline and baseline.get("accuracy") is not None:
-                return {
-                    "status": "optimization_in_progress",
-                    "message": "Optimization is already running. Baseline results are available. "
-                    "Wait for optimization to complete, then call pluto_get_results.",
-                    "classifier_id": classifier_id,
-                    "baseline": {
-                        "accuracy": baseline.get("accuracy"),
-                        "precision": baseline.get("precision"),
-                        "recall": baseline.get("recall"),
-                    },
-                }
-    except Exception:
-        pass  # Can't check — proceed normally
+        if optimized and optimized.get("accuracy") is not None:
+            return {
+                "status": "already_optimized",
+                "message": "Optimization was already completed. Here are the results.",
+                "classifier_id": classifier_id,
+                "slug": slug,
+                "version": version,
+                "endpoint_url": f"{RUN_BASE}/ioa/v1/{slug}/{version}",
+                "dashboard_url": f"{DASHBOARD_BASE}/classifier/{slug}/{version}",
+                "baseline": {
+                    "accuracy": baseline.get("accuracy"),
+                    "precision": baseline.get("precision"),
+                    "recall": baseline.get("recall"),
+                },
+                "optimized": {
+                    "accuracy": optimized.get("accuracy"),
+                    "precision": optimized.get("precision"),
+                    "recall": optimized.get("recall"),
+                },
+            }
+        elif baseline and baseline.get("accuracy") is not None:
+            return {
+                "status": "optimization_in_progress",
+                "message": "Optimization is already running. Baseline results are available. "
+                "Wait for optimization to complete, then call pluto_get_results.",
+                "classifier_id": classifier_id,
+                "baseline": {
+                    "accuracy": baseline.get("accuracy"),
+                    "precision": baseline.get("precision"),
+                    "recall": baseline.get("recall"),
+                },
+            }
 
     return None  # No optimization found — proceed with sending the message
 
@@ -448,10 +497,11 @@ def tool_send_message(args):
                     thread_id,
                     len(events),
                 )
-            except Exception as e:
-                _log.warning(
-                    "OPTIMIZE BACKGROUND ERROR: thread=%s, error=%s", thread_id, str(e)
-                )
+            except (HTTPError, OSError):
+                # Fire-and-forget: the user already saw "optimization_started".
+                # Failure surfaces later when they call pluto_get_results and
+                # see no results — the traceback here is the only diagnostic.
+                _log.exception("OPTIMIZE BACKGROUND ERROR: thread=%s", thread_id)
 
         t = threading.Thread(target=_run_optimize, daemon=True)
         t.start()
@@ -461,7 +511,7 @@ def tool_send_message(args):
             "It runs in the background (~2 min for LLM, ~20 min for SLM). "
             "Use pluto_get_results later to check results.",
             "thread_id": thread_id,
-            "dashboard_url": f"https://pluto.plurai.ai/thread/{thread_id}",
+            "dashboard_url": f"{DASHBOARD_BASE}/thread/{thread_id}",
         }
 
     _log.warning("AGENT CALL: thread=%s, message=%s", thread_id, message[:100])
@@ -636,8 +686,10 @@ def tool_search_evaluators(args):
                 )
                 has_optimization = True
                 break
-            except Exception:
-                continue
+            except HTTPError as e:
+                if e.code == 404:
+                    continue
+                raise
 
         results.append(
             {
@@ -654,8 +706,8 @@ def tool_search_evaluators(args):
                         .get("enum", [])
                     )
                 ],
-                "endpoint_url": f"https://run.plurai.ai/ioa/v1/{slug}/{version}",
-                "dashboard_url": f"https://pluto.plurai.ai/classifier/{slug}/{version}",
+                "endpoint_url": f"{RUN_BASE}/ioa/v1/{slug}/{version}",
+                "dashboard_url": f"{DASHBOARD_BASE}/classifier/{slug}/{version}",
                 "has_optimization": has_optimization,
                 "created_at": c.get("createdAt", ""),
             }
@@ -682,7 +734,10 @@ def tool_get_results(args):
     slug = classifier["slug"]
     version = classifier.get("defaultVersion", {}).get("number", "1.0.0")
 
-    # Get optimization results — try UUID first, then slug
+    # Get optimization results — try UUID first, then slug. 404 on both means
+    # "no optimization run yet" (returned with empty baseline/optimized);
+    # any other HTTP error propagates so the caller doesn't read empty results
+    # as "optimized but accuracy=None".
     baseline = {}
     optimized = {}
     for identifier in [classifier_id, slug]:
@@ -695,15 +750,17 @@ def tool_get_results(args):
             baseline = opt.get("baseline", {})
             optimized = opt.get("optimized", {})
             break
-        except Exception:
-            continue
+        except HTTPError as e:
+            if e.code == 404:
+                continue
+            raise
 
     return {
         "classifier_id": classifier_id,
         "slug": slug,
         "version": version,
-        "endpoint_url": f"https://run.plurai.ai/ioa/v1/{slug}/{version}",
-        "dashboard_url": f"https://pluto.plurai.ai/classifier/{slug}/{version}",
+        "endpoint_url": f"{RUN_BASE}/ioa/v1/{slug}/{version}",
+        "dashboard_url": f"{DASHBOARD_BASE}/classifier/{slug}/{version}",
         "baseline": {
             "accuracy": baseline.get("accuracy"),
             "precision": baseline.get("precision"),
@@ -911,8 +968,7 @@ def handle_message(msg):
                 {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]},
             )
         except HTTPError as e:
-            error_body = e.read().decode() if e.fp else str(e)
-            send_error(id, -32000, f"HTTP {e.code}: {error_body}")
+            send_error(id, -32000, f"HTTP {e.code}: {_safe_error_body(e)}")
         except Exception as e:
             send_error(id, -32000, str(e))
     else:

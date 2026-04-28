@@ -111,8 +111,8 @@ production.
 
 ## Security model
 
-The full threat model and hardening rationale is in the project plan
-(`/Users/ben/.claude/plans/check-docs-rfcs-0001-web-broker-cli-auth-serene-quill.md`).
+The full threat model and design rationale live in
+[`docs/rfcs/0001-web-broker-cli-auth.md`](../../docs/rfcs/0001-web-broker-cli-auth.md).
 The short version:
 
 ### What this page defends against

@@ -3,9 +3,10 @@ import { createRoot } from "react-dom/client";
 import { ClerkProvider } from "@clerk/clerk-react";
 import { App } from "./App";
 
-// 1. Top-frame guard. Belt-and-braces with `frame-ancestors 'none'` from the
-//    server-side CSP — see hardening plan §C2. Cross-origin top-window access
-//    can throw, so treat any throw as "framed" and refuse to render.
+// 1. Top-frame guard. Backstop in case the server-side
+//    `frame-ancestors 'none'` CSP isn't applied at the deploy layer.
+//    Cross-origin top-window access can throw, so treat any throw as
+//    "framed" and refuse to render.
 try {
   if (window.top !== window.self) {
     document.documentElement.replaceChildren();
@@ -23,9 +24,10 @@ if (import.meta.env.PROD && window.location.protocol !== "https:") {
   throw new Error("insecure context");
 }
 
-// 3. Suppress global error/unhandledrejection bubbling. If the parent webapp
-//    ever wires Sentry/Datadog/RUM, this stops them from capturing
-//    window.location while the token is momentarily on the URL.
+// 3. Suppress global error/unhandledrejection bubbling. RUM agents
+//    (Sentry/Datadog/etc.) commonly intercept fetch — if one is wired up on
+//    the parent webapp, this prevents it from capturing the POST body
+//    (which carries the JWT) into a log pipeline.
 window.addEventListener("error", (e) => e.preventDefault(), { capture: true });
 window.addEventListener("unhandledrejection", (e) => e.preventDefault());
 

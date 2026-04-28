@@ -11,7 +11,7 @@
 //   - Errors that happen BEFORE redirect_uri is validated must NOT contact
 //     the loopback — render a static page and rely on the CLI's timeout.
 //
-// See /Users/ben/workspace/pluto-judge/docs/rfcs/0001-web-broker-cli-auth.md.
+// See docs/rfcs/0001-web-broker-cli-auth.md.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth, useClerk, useUser } from "@clerk/clerk-react";
@@ -50,12 +50,21 @@ function completedKey(state: string): string {
 
 // Send the handoff payload to the CLI loopback. We POST instead of redirecting
 // so the JWT never leaves the request body — no browser history entry, no
-// referrer, no address-bar exposure. Returns true on a 2xx response from the
-// loopback. CORS is enforced by the CLI's `Access-Control-Allow-Origin`
-// allowlist, and the CLI cross-checks `state` defensively.
-async function postHandoff(redirectUrl: URL, body: Record<string, unknown>): Promise<boolean> {
+// referrer, no address-bar exposure. CORS is enforced by the CLI's
+// `Access-Control-Allow-Origin` allowlist, and the CLI cross-checks `state`
+// defensively.
+type HandoffResult =
+  | { ok: true }
+  | { ok: false; kind: "rejected"; status: number }
+  | { ok: false; kind: "unreachable" };
+
+async function postHandoff(
+  redirectUrl: URL,
+  body: Record<string, unknown>,
+): Promise<HandoffResult> {
+  let res: Response;
   try {
-    const res = await fetch(redirectUrl.toString(), {
+    res = await fetch(redirectUrl.toString(), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -65,10 +74,15 @@ async function postHandoff(redirectUrl: URL, body: Record<string, unknown>): Pro
       redirect: "error",
       referrerPolicy: "no-referrer",
     });
-    return res.ok;
   } catch {
-    return false;
+    // Browser collapses CORS-blocked, connection-refused, DNS, and TLS
+    // failures into a single TypeError. We can't distinguish them here, so
+    // treat them all as "loopback unreachable" — the actionable remedy
+    // (re-run `pluto auth login`) is the same.
+    return { ok: false, kind: "unreachable" };
   }
+  if (res.ok) return { ok: true };
+  return { ok: false, kind: "rejected", status: res.status };
 }
 
 export function App() {
@@ -77,6 +91,9 @@ export function App() {
   const { user } = useUser();
   const clerk = useClerk();
   const [phase, setPhase] = useState<Phase>("validating");
+  const [handoffFailure, setHandoffFailure] = useState<
+    Exclude<HandoffResult, { ok: true }> | null
+  >(null);
   const tokenRef = useRef<string | null>(null);
   const startedRef = useRef(false);
 
@@ -149,14 +166,15 @@ export function App() {
 
       tokenRef.current = token;
       setPhase("posting");
-      const ok = await postHandoff(validation.redirectUrl, {
+      const result = await postHandoff(validation.redirectUrl, {
         state: validation.state,
         token,
         expires_at: exp,
       });
       tokenRef.current = null;
       if (cancelled) return;
-      if (!ok) {
+      if (!result.ok) {
+        setHandoffFailure(result);
         setPhase("error");
         return;
       }
@@ -189,6 +207,7 @@ export function App() {
         phase={phase}
         validationOk={validation.ok}
         validationError={validation.ok ? null : validation.error}
+        handoffFailure={handoffFailure}
         email={user?.primaryEmailAddress?.emailAddress}
       />
     </main>
@@ -199,11 +218,13 @@ function Status({
   phase,
   validationOk,
   validationError,
+  handoffFailure,
   email,
 }: {
   phase: Phase;
   validationOk: boolean;
   validationError: string | null;
+  handoffFailure: Exclude<HandoffResult, { ok: true }> | null;
   email: string | undefined;
 }) {
   if (!validationOk) {
@@ -214,9 +235,16 @@ function Status({
     );
   }
   if (phase === "error") {
-    return (
-      <p style={{ marginTop: "1rem", color: "#b00020" }}>{STATUS_ERROR}</p>
-    );
+    let detail: string;
+    if (handoffFailure?.kind === "unreachable") {
+      detail =
+        "Couldn't reach the CLI on the loopback port. Check that pluto auth login is still running in your terminal and didn't time out.";
+    } else if (handoffFailure?.kind === "rejected") {
+      detail = `The CLI rejected the sign-in (HTTP ${handoffFailure.status}). Re-run pluto auth login.`;
+    } else {
+      detail = STATUS_ERROR;
+    }
+    return <p style={{ marginTop: "1rem", color: "#b00020" }}>{detail}</p>;
   }
   if (phase === "already-completed") {
     return <p style={{ marginTop: "1rem" }}>{STATUS_ALREADY}</p>;
