@@ -4,6 +4,26 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="referrer" content="no-referrer" />
+    <meta name="robots" content="noindex,nofollow,noarchive,nosnippet" />
+    <meta name="color-scheme" content="light dark" />
+    <!--
+      Belt-and-braces CSP via meta. Real protection is server headers (see
+      ../../docs/rfcs/0001-web-broker-cli-auth.md hardening plan §C2). Note:
+      meta http-equiv CANNOT enforce frame-ancestors or report-uri — those
+      must come from a real HTTP header. Confirm exact Clerk hostnames against
+      the staging Network panel before locking the prod CSP.
+    -->
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'none';
+                   script-src 'self' https://*.clerk.accounts.dev https://*.clerk.com https://*.clerk.dev;
+                   connect-src 'self' https://*.clerk.accounts.dev https://*.clerk.com https://*.clerk.dev https://clerk-telemetry.com;
+                   img-src 'self' data: https://img.clerk.com;
+                   style-src 'self' 'unsafe-inline';
+                   font-src 'self' data:;
+                   form-action 'none';
+                   base-uri 'none';
+                   object-src 'none';
+                   upgrade-insecure-requests" />
     <title>Pluto CLI sign-in</title>
   </head>
   <body>

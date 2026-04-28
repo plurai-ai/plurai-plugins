@@ -8,4 +8,20 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
   },
+  build: {
+    target: "es2022",
+    sourcemap: false,
+    cssCodeSplit: true,
+    minify: "esbuild",
+    rollupOptions: {
+      output: {
+        entryFileNames: "assets/[name]-[hash].js",
+        chunkFileNames: "assets/[name]-[hash].js",
+        assetFileNames: "assets/[name]-[hash][extname]",
+      },
+    },
+  },
+  esbuild: {
+    drop: ["console", "debugger"],
+  },
 });
