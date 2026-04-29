@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 import pytest
 
+from pluto_judge.clients.agent import RUN_PATH
 from pluto_judge.config import get_settings
 from pluto_judge.errors import safe_error_body
 from pluto_judge.tools.classifiers import (
@@ -30,7 +31,7 @@ from pluto_judge.tools.judge import (
 
 _settings = get_settings()
 PLUTO_API = _settings.pluto_api
-AGENT_API = _settings.agent_api
+AGENT_API = f"{_settings.agent_api_base}{RUN_PATH}"
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 

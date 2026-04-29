@@ -2,19 +2,17 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated, Any, cast
+from typing import Annotated, Any, cast
 
 import httpx
 from mcp.server.fastmcp import Context
+from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..clients import CreateExampleFileRequest, ExampleRecordInput
 from ..errors import format_tool_error
 from ..state import ServerState
-
-if TYPE_CHECKING:
-    from mcp.server.fastmcp import FastMCP
 
 _StrictModel = ConfigDict(extra="forbid", str_strip_whitespace=True)
 

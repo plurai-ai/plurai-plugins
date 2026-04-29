@@ -14,6 +14,11 @@ import uuid
 from .base import BaseHttpClient
 from .models import AgentEnvelope, AgentEvent, AgentMessage, AgentRunBody
 
+# Path of the agent run endpoint, relative to the configured base_url.
+# Public so tests can assert against the resolved URL without re-hardcoding
+# the literal.
+RUN_PATH = "/copilotkit"
+
 
 class AgentClient(BaseHttpClient):
     """Async client for the Pluto agent (CopilotKit) endpoint."""
@@ -40,7 +45,7 @@ class AgentClient(BaseHttpClient):
             ),
         )
         raw = await self._stream_sse_authed(
-            "/copilotkit",
+            RUN_PATH,
             envelope.model_dump(by_alias=True),
             timeout=timeout,
         )

@@ -28,19 +28,30 @@ Code spawns the MCP server automatically. No manual `.mcp.json` edits.
 
 ## Authentication
 
-Browser-based login via OAuth 2.0 + PKCE against Clerk (Pluto's identity
-provider). Cross-platform — any OS, any browser.
+Two backends, selected by `PLUTO_AUTH_METHOD`:
 
-**One-time setup** — once the plugin is installed, run inside any
-Claude Code session:
+- **`chrome` (default, macOS only)** — reads your existing Pluto session
+  straight from the local Chrome cookie store and exchanges it for a JWT
+  via Clerk. No browser flow, no file-based credential store; if you're
+  already signed in to Pluto in Chrome it just works. Requires `openssl`
+  on `PATH` and reads the Chrome safe-storage seed from the macOS
+  keychain (override with `CHROME_SAFE_STORAGE` for non-keychain setups).
+
+- **`broker` (cross-platform)** — browser-based OAuth 2.0 + PKCE flow
+  against Clerk. Tokens are written to
+  `~/.config/pluto/credentials.json` (mode `0600`, override with
+  `PLUTO_CREDENTIALS_PATH`) and refreshed automatically. Use this on
+  Linux/Windows or when you don't have a usable Chrome session.
+
+**Sign in** — once the plugin is installed, from any Claude Code session:
 
 ```
-/judge:login
+/pluto-judge:login
 ```
 
-That command opens your default browser to the Pluto login page. After
-you sign in, tokens are stored at `~/.config/pluto/credentials.json`
-(mode `0600`) and refreshed automatically.
+In `chrome` mode the command verifies the cached cookie/JWT and prints
+who you're signed in as; in `broker` mode it opens your default browser
+to the Pluto login page and waits for you to complete sign-in.
 
 ## Usage
 
@@ -66,7 +77,12 @@ you sign in, tokens are stored at `~/.config/pluto/credentials.json`
 |---|---|---|
 | `PLUTO_API_BASE` | `https://pluto.stg.plurai.ai` | API host (set to `https://pluto.plurai.ai` for prod) |
 | `PLUTO_RUN_BASE` | (auto: prod ↔ staging) | Override the inference endpoint URL |
-| `PLUTO_AUTH_METHOD` | `chrome` | `chrome` or `broker` (RFC 0001) |
+| `PLUTO_AUTH_METHOD` | `chrome` | `chrome` (macOS, default) or `broker` (RFC 0001, cross-platform) |
+| `PLUTO_CREDENTIALS_PATH` | `~/.config/pluto/credentials.json` | Broker-only credentials file path |
+| `CHROME_SAFE_STORAGE` | (read from macOS keychain) | Chrome-only safe-storage seed override |
+| `PLUTO_HTTP_TIMEOUT` | `30` | Per-request timeout for Pluto JSON calls (seconds) |
+| `PLUTO_AGENT_HTTP_TIMEOUT` | `300` | Timeout for the long-running agent SSE stream (seconds) |
+| `PLUTO_HTTP_MAX_RETRIES` | `3` | Retries on retryable HTTP failures (5xx/429/408/transport) |
 
 ## Local development
 

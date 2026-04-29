@@ -45,16 +45,10 @@ class Settings(BaseSettings):
     def agent_api_base(self) -> str:
         """Base URL for the CopilotKit agent endpoint (no trailing path).
 
-        Used as the ``api_url`` for ``AgentClient`` so requests can supply
-        ``/copilotkit`` as the path. Posting to a base_url with an empty
-        path makes httpx normalise to a trailing slash, which the agent
-        backend rejects with a 404.
+        Used as ``base_url`` for ``AgentClient``'s underlying httpx client;
+        the request path (``/copilotkit``) is owned by ``AgentClient`` itself.
         """
         return f"{self.api_base}/api/agent/api"
-
-    @cached_property
-    def agent_api(self) -> str:
-        return f"{self.agent_api_base}/copilotkit"
 
     @cached_property
     def run_url(self) -> str:

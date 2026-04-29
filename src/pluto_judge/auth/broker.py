@@ -31,6 +31,7 @@ import secrets
 import sys
 import threading
 import time
+from typing import Any
 import webbrowser
 from urllib.parse import quote, urlparse
 
@@ -95,7 +96,7 @@ def get_token():
         return _login_unlocked()["access_token"]
 
 
-def force_login():
+def force_login()->dict[str, Any]:
     """Programmatic re-auth. Always opens the browser. Raises on failure.
 
     Used by the server's 401-retry path to invalidate any cached/stale token
@@ -242,7 +243,7 @@ class _CallbackHandler(http.server.BaseHTTPRequestHandler):
         return  # silence default access log
 
 
-def _login_unlocked():
+def _login_unlocked()->dict[str, Any]:
     """Run the broker flow, persist new credentials, return the dict.
     Caller must hold `_token_lock`."""
     state = secrets.token_urlsafe(16)

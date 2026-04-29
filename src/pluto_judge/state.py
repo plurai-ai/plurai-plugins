@@ -7,37 +7,27 @@ Tools reach it via `ctx.request_context.lifespan_context`.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
 
-from . import auth as _auth
+from mcp.server.fastmcp import FastMCP
+
+from .auth import agent_headers, force_login, pluto_headers
 from .clients import AgentClient, PlutoClient
 from .config import get_settings
 
-if TYPE_CHECKING:
-    from mcp.server.fastmcp import FastMCP
-
-# Cast `force_login` once at the boundary; pluto-judge's auth subpackage is
-# excluded from strict pyright (untyped urllib code) so its inferred return
-# type leaks ``dict[Unknown, Unknown]`` into the strict-checked modules.
-_force_login_sync: Callable[[], Any] = cast(
-    Callable[[], Any],
-    _auth.force_login,  # pyright: ignore[reportUnknownMemberType]
-)
-
 
 async def _async_pluto_headers() -> dict[str, str]:
-    return dict(await asyncio.to_thread(_auth.pluto_headers))
+    return dict(await asyncio.to_thread(pluto_headers))
 
 
 async def _async_agent_headers() -> dict[str, str]:
-    return dict(await asyncio.to_thread(_auth.agent_headers))
+    return dict(await asyncio.to_thread(agent_headers))
 
 
 async def _async_force_login() -> None:
-    await asyncio.to_thread(_force_login_sync)
+    await asyncio.to_thread(force_login)
 
 
 @dataclass

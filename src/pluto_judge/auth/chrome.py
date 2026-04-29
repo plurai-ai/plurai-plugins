@@ -40,6 +40,7 @@ import sys
 import tempfile
 import threading
 import time
+from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -366,7 +367,7 @@ def _verify_pluto_api(token: str) -> None:
         ) from e
 
 
-def force_login() -> dict:
+def force_login() -> dict[str, Any]:
     """Programmatic re-auth for the server's 401-retry path.
 
     No browser flow in this mode — clear the in-memory cache and re-read

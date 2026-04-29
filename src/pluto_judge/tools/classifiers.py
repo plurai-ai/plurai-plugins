@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
+from typing import Annotated, Any, Literal, cast
 
 import httpx
 from mcp.server.fastmcp import Context
+from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -19,9 +20,6 @@ from ..clients import (
 from ..config import get_settings
 from ..errors import format_tool_error
 from ..state import ServerState
-
-if TYPE_CHECKING:
-    from mcp.server.fastmcp import FastMCP
 
 _StrictModel = ConfigDict(extra="forbid", str_strip_whitespace=True)
 ResponseFormat = Literal["json", "markdown"]
