@@ -1,7 +1,8 @@
 """Entry point for `python -m pluto_judge` and the `pluto-judge` console script.
 
 Default mode runs the FastMCP stdio server. With a leading `auth` argument,
-forwards the rest to the auth subcommand CLI.
+forwards the rest to the auth subcommand CLI — e.g.
+``python -m pluto_judge auth login`` / ``status`` / ``logout``.
 """
 
 from __future__ import annotations

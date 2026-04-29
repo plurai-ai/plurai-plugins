@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import httpx
@@ -9,8 +10,14 @@ from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..config import PLUTO_API, RUN_BASE
-from ..errors import safe_error_body
+from ..clients import (
+    ClassifierSummaryView,
+    GetClassifierResponse,
+    MetricsView,
+    OptimizationView,
+)
+from ..config import get_settings
+from ..errors import format_tool_error
 from ..state import ServerState
 
 if TYPE_CHECKING:
@@ -65,48 +72,36 @@ def _state(ctx: Context[Any, Any, Any]) -> ServerState:
     return cast(ServerState, ctx.request_context.lifespan_context)
 
 
-def _metrics(m: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "accuracy": m.get("accuracy"),
-        "precision": m.get("precision"),
-        "recall": m.get("recall"),
-    }
-
-
 async def _has_optimization(
     state: ServerState, classifier_uuid: str, slug: str, version: str
 ) -> bool:
     for identifier in (classifier_uuid, slug):
-        try:
-            await state.pluto.request(
-                "GET",
-                f"{PLUTO_API}/classifiers/{identifier}/versions/{version}/optimization",
-            )
+        if (await state.pluto.get_optimization(identifier, version)) is not None:
             return True
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                continue
-            raise
     return False
 
 
 async def _fetch_optimization(
     state: ServerState, classifier_uuid: str, slug: str, version: str
-) -> dict[str, Any] | None:
+) -> OptimizationView | None:
     for identifier in (classifier_uuid, slug):
-        try:
-            return cast(
-                dict[str, Any],
-                await state.pluto.request(
-                    "GET",
-                    f"{PLUTO_API}/classifiers/{identifier}/versions/{version}/optimization",
-                ),
-            )
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                continue
-            raise
+        opt = await state.pluto.get_optimization(identifier, version)
+        if opt is not None:
+            return opt
     return None
+
+
+def _labels_of(c: ClassifierSummaryView) -> list[str]:
+    properties = c.output_schema.get("properties", {})
+    if not isinstance(properties, dict):
+        return []
+    label_props = cast(dict[str, Any], properties).get("label", {})
+    if not isinstance(label_props, dict):
+        return []
+    enum = cast(dict[str, Any], label_props).get("enum")
+    if not isinstance(enum, list):
+        return []
+    return [str(x) for x in cast(list[Any], enum)]
 
 
 def _format_search_markdown(results: list[dict[str, Any]], total: int, offset: int) -> str:
@@ -161,28 +156,31 @@ def _format_get_results_markdown(payload: dict[str, Any]) -> str:
 
 async def _search_evaluators(args: SearchEvaluatorsArgs, ctx: Context[Any, Any, Any]) -> Any:
     state = _state(ctx)
-    listing = await state.pluto.request("GET", f"{PLUTO_API}/classifiers")
-    items: list[dict[str, Any]] = listing.get("items", [])
+    settings = get_settings()
+    listing = await state.pluto.list_classifiers()
+    items = listing.items
     page = items[args.offset : args.offset + args.limit]
 
+    async def _probe(c: ClassifierSummaryView) -> tuple[ClassifierSummaryView, str, bool]:
+        version = c.default_version.number if c.default_version else "1.0.0"
+        has_opt = await _has_optimization(state, c.id, c.slug, version)
+        return c, version, has_opt
+
+    probed = await asyncio.gather(*(_probe(c) for c in page))
+
     results: list[dict[str, Any]] = []
-    for c in page:
-        slug = c.get("slug", "")
-        version = c.get("defaultVersion", {}).get("number", "1.0.0")
-        has_opt = await _has_optimization(state, c["id"], slug, version)
-        labels = list(
-            c.get("outputSchema", {}).get("properties", {}).get("label", {}).get("enum", [])
-        )
+    for c, version, has_opt in probed:
+        slug = c.slug
         results.append(
             {
-                "id": c["id"],
-                "name": c.get("name", ""),
-                "description": (c.get("description") or "")[:200],
+                "id": c.id,
+                "name": c.name,
+                "description": (c.description or "")[:200],
                 "slug": slug,
-                "labels": labels,
-                "endpoint_url": f"{RUN_BASE}/ioa/v1/{slug}/{version}",
+                "labels": _labels_of(c),
+                "endpoint_url": f"{settings.run_url}/ioa/v1/{slug}/{version}",
                 "has_optimization": has_opt,
-                "created_at": c.get("createdAt", ""),
+                "created_at": c.created_at,
             }
         )
 
@@ -204,21 +202,22 @@ async def _search_evaluators(args: SearchEvaluatorsArgs, ctx: Context[Any, Any, 
 
 async def _get_results(args: GetResultsArgs, ctx: Context[Any, Any, Any]) -> Any:
     state = _state(ctx)
-    classifier = await state.pluto.request("GET", f"{PLUTO_API}/classifiers/{args.classifier_id}")
-    slug: str = classifier["slug"]
-    version: str = classifier.get("defaultVersion", {}).get("number", "1.0.0")
+    settings = get_settings()
+    classifier: GetClassifierResponse = await state.pluto.get_classifier(args.classifier_id)
+    slug = classifier.slug
+    version = classifier.default_version.number if classifier.default_version else "1.0.0"
 
     opt = await _fetch_optimization(state, args.classifier_id, slug, version)
-    baseline: dict[str, Any] = (opt or {}).get("baseline", {})
-    optimized: dict[str, Any] = (opt or {}).get("optimized", {})
+    baseline = opt.baseline if opt else MetricsView()
+    optimized = opt.optimized if opt else MetricsView()
 
     payload: dict[str, Any] = {
         "classifier_id": args.classifier_id,
         "slug": slug,
         "version": version,
-        "endpoint_url": f"{RUN_BASE}/ioa/v1/{slug}/{version}",
-        "baseline": _metrics(baseline),
-        "optimized": _metrics(optimized),
+        "endpoint_url": f"{settings.run_url}/ioa/v1/{slug}/{version}",
+        "baseline": baseline.model_dump(),
+        "optimized": optimized.model_dump(),
     }
     if args.response_format == "json":
         return payload
@@ -227,10 +226,8 @@ async def _get_results(args: GetResultsArgs, ctx: Context[Any, Any, Any]) -> Any
 
 async def _create_api_key(args: CreateApiKeyArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
     state = _state(ctx)
-    result = await state.pluto.request(
-        "POST", f"{PLUTO_API}/api-keys", json_body={"name": args.name}
-    )
-    return {"api_key": result["secret"], "key_id": result["id"]}
+    result = await state.pluto.create_api_key(args.name)
+    return {"api_key": result.secret, "key_id": result.id}
 
 
 # ── Registration ─────────────────────────────────────────────────────────
@@ -255,8 +252,8 @@ def register(mcp: FastMCP) -> None:
     ) -> Any:
         try:
             return await _search_evaluators(args, ctx)
-        except httpx.HTTPStatusError as e:
-            return {"error": f"HTTP {e.response.status_code}: {safe_error_body(e)}"}
+        except (httpx.HTTPStatusError, httpx.TransportError, RuntimeError) as e:
+            return format_tool_error(e)
 
     @mcp.tool(
         name="pluto_get_results",
@@ -271,8 +268,8 @@ def register(mcp: FastMCP) -> None:
     async def pluto_get_results(args: GetResultsArgs, ctx: Context[Any, Any, Any]) -> Any:
         try:
             return await _get_results(args, ctx)
-        except httpx.HTTPStatusError as e:
-            return {"error": f"HTTP {e.response.status_code}: {safe_error_body(e)}"}
+        except (httpx.HTTPStatusError, httpx.TransportError, RuntimeError) as e:
+            return format_tool_error(e)
 
     @mcp.tool(
         name="pluto_create_api_key",
@@ -289,7 +286,7 @@ def register(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         try:
             return await _create_api_key(args, ctx)
-        except httpx.HTTPStatusError as e:
-            return {"error": f"HTTP {e.response.status_code}: {safe_error_body(e)}"}
+        except (httpx.HTTPStatusError, httpx.TransportError, RuntimeError) as e:
+            return format_tool_error(e)
 
     _ = (pluto_search_evaluators, pluto_get_results, pluto_create_api_key)

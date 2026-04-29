@@ -2,19 +2,19 @@
 
 Reads the user's existing Pluto session straight out of the local Chrome
 cookie store and exchanges it for a Pluto JWT via the Clerk Frontend
-API. Currently the default backend (selected by the dispatcher in
-`auth.py`) while the web-broker flow in `auth_broker.py` is still being
-wired up — set `PLUTO_AUTH_METHOD=broker` to opt back into the broker.
+API. Selected by the dispatcher in ``pluto_judge.auth`` when
+``PLUTO_AUTH_METHOD=chrome`` (the current default); set
+``PLUTO_AUTH_METHOD=broker`` to use ``pluto_judge.auth.broker`` instead.
 
-Same public API as `auth_broker.py`: `get_token`, `force_login`,
-`pluto_headers`, `agent_headers`, `main`. `pluto_headers` uses the
-default Clerk session JWT (Pluto API audience); `agent_headers` mints
-a separate template JWT for the CopilotKit agent endpoint.
+Same public API as the broker backend: ``get_token``, ``force_login``,
+``pluto_headers``, ``agent_headers``, ``main``. ``pluto_headers`` uses
+the default Clerk session JWT (Pluto API audience); ``agent_headers``
+mints a separate template JWT for the CopilotKit agent endpoint.
 
-Self-contained — can be run standalone for testing:
+Self-contained — can be invoked standalone for testing:
 
-    PLUTO_AUTH_METHOD=chrome python src/auth.py status
-    PLUTO_AUTH_METHOD=chrome python src/auth.py login
+    PLUTO_AUTH_METHOD=chrome python -m pluto_judge auth status
+    PLUTO_AUTH_METHOD=chrome python -m pluto_judge auth login
 
 Requirements:
 - macOS (Chrome cookie paths are hardcoded to ~/Library/...)
@@ -80,9 +80,25 @@ def _read_safe_storage() -> str:
             text=True,
             timeout=10,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(
+            f"WARNING: Could not read Chrome safe-storage seed via `security`: {e}. "
+            "Set CHROME_SAFE_STORAGE to override.",
+            file=sys.stderr,
+        )
         return ""
-    return result.stdout.strip() if result.returncode == 0 else ""
+    if result.returncode != 0:
+        # rc=44 → keychain item not found; rc=51 → user denied access. Either
+        # way the caller can't decrypt cookies; surface enough context for
+        # the user to fix it instead of silently failing.
+        print(
+            f"WARNING: `security find-generic-password` for 'Chrome Safe Storage' "
+            f"failed (rc={result.returncode}): {result.stderr.strip()}. "
+            "Set CHROME_SAFE_STORAGE to override.",
+            file=sys.stderr,
+        )
+        return ""
+    return result.stdout.strip()
 
 
 def _chrome_key() -> bytes | None:

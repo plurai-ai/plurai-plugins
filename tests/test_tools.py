@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 import pytest
 
-from pluto_judge.config import AGENT_API, PLUTO_API
+from pluto_judge.config import get_settings
 from pluto_judge.errors import safe_error_body
 from pluto_judge.tools.classifiers import (
     GetResultsArgs,
@@ -24,11 +24,13 @@ from pluto_judge.tools.judge import (
     SendMessageArgs,
     StartJudgeArgs,
     _ask_user,
-    _needs_input_template,
-    _normalize_name,
     _send_message,
     _start_judge,
 )
+
+_settings = get_settings()
+PLUTO_API = _settings.pluto_api
+AGENT_API = _settings.agent_api
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -39,25 +41,6 @@ def _sse_body(events: list[dict[str, Any]]) -> bytes:
 
 
 # ── Pure helpers (no network) ────────────────────────────────────────────
-
-
-def test_normalize_name_truncates_word_count() -> None:
-    assert _normalize_name("a b c d e f g") == "a b c d e"
-
-
-def test_normalize_name_truncates_long_strings() -> None:
-    name = "x" * 60
-    assert len(_normalize_name(name)) <= 50
-
-
-def test_needs_input_template_detects_grounding() -> None:
-    assert _needs_input_template("Classify whether response is grounded in context")
-
-
-def test_needs_input_template_skipped_when_template_present() -> None:
-    assert not _needs_input_template(
-        "Grounding. Input format: '## Context:\\n{c}\\n\\n## Response:\\n{r}'"
-    )
 
 
 def test_safe_error_body_redacts_secrets() -> None:
@@ -193,7 +176,6 @@ async def test_start_judge_happy_path(httpx_mock: Any, ctx: Any) -> None:
         method="POST",
         json={"id": "thread-1", "exampleSetId": "es-1"},
     )
-    httpx_mock.add_response(url=f"{PLUTO_API}/threads/thread-1", method="PATCH", json={})
     httpx_mock.add_response(
         url=AGENT_API,
         method="POST",
@@ -212,10 +194,7 @@ async def test_start_judge_happy_path(httpx_mock: Any, ctx: Any) -> None:
     )
 
     out = await _start_judge(
-        StartJudgeArgs(
-            name="abc def ghi jkl mno pqr stu",  # > 5 words; should truncate
-            task_description="Classify outputs as safe or unsafe",
-        ),
+        StartJudgeArgs(task_description="Classify outputs as safe or unsafe"),
         ctx,
     )
     assert out["thread_id"] == "thread-1"
@@ -223,19 +202,6 @@ async def test_start_judge_happy_path(httpx_mock: Any, ctx: Any) -> None:
     assert out["action_required"] == "PRESENT_QUESTIONS_TO_USER"
     assert out["agent_response"] == "What labels?"
     assert ctx.request_context.lifespan_context.has_questions is True
-
-
-@pytest.mark.asyncio
-async def test_start_judge_blocks_multifield_without_template(ctx: Any) -> None:
-    out = await _start_judge(
-        StartJudgeArgs(
-            name="grounding eval",
-            task_description="Detect when response is not grounded in context",
-        ),
-        ctx,
-    )
-    assert "error" in out
-    assert "input template" in out["error"].lower()
 
 
 # ── ask_user: gating + decline-fallback ──────────────────────────────────

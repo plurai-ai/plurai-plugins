@@ -65,7 +65,6 @@ you sign in, tokens are stored at `~/.config/pluto/credentials.json`
 | Var | Default | Purpose |
 |---|---|---|
 | `PLUTO_API_BASE` | `https://pluto.stg.plurai.ai` | API host (set to `https://pluto.plurai.ai` for prod) |
-| `PLUTO_DASHBOARD_BASE` | (= API host) | Override the dashboard URL surfaced in tool responses |
 | `PLUTO_RUN_BASE` | (auto: prod ↔ staging) | Override the inference endpoint URL |
 | `PLUTO_AUTH_METHOD` | `chrome` | `chrome` or `broker` (RFC 0001) |
 

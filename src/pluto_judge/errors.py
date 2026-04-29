@@ -1,7 +1,10 @@
 """Safe formatting of backend error bodies for forwarding into model context.
 
-Caps length, redacts secret-shaped JSON values. Ported from the urllib-based
-helper but operates on `httpx.Response` instead of `urllib.error.HTTPError`.
+Caps length, redacts secret-shaped JSON values. Operates on
+`httpx.Response`. Also exposes `format_tool_error` for tool wrappers, which
+turns transport / status / auth-refresh errors into a consistent
+``{"error": ...}`` envelope rather than letting the FastMCP runtime turn
+them into opaque protocol errors.
 """
 
 from __future__ import annotations
@@ -49,3 +52,21 @@ def _redact(node: Any) -> None:
         node_list = cast("list[Any]", node)
         for item in node_list:
             _redact(item)
+
+
+def format_tool_error(exc: BaseException) -> dict[str, str]:
+    """Map a backend or auth exception to a tool-result error envelope.
+
+    Covers the classes of failure that escape from `BaseHttpClient` and the
+    auth subpackage:
+      * `httpx.HTTPStatusError` — server returned a non-retryable status
+      * `httpx.TransportError` — network/DNS/timeout failures after retries
+      * `RuntimeError` — auth refresh / chrome / broker dispatch failures
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return {"error": f"HTTP {exc.response.status_code}: {safe_error_body(exc)}"}
+    if isinstance(exc, httpx.TransportError):
+        return {"error": f"Network error reaching Pluto: {exc}"}
+    if isinstance(exc, RuntimeError):
+        return {"error": f"Pluto request failed: {exc}"}
+    raise exc

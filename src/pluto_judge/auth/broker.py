@@ -76,7 +76,12 @@ def _load_credentials():
     try:
         with open(CRED_PATH) as f:
             return json.load(f)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as e:
+        print(
+            f"WARNING: Could not load credentials at {CRED_PATH} ({e}); "
+            "treating as not logged in.",
+            file=sys.stderr,
+        )
         return None
 
 
@@ -339,8 +344,12 @@ def logout():
         return 0
     try:
         os.unlink(CRED_PATH)
-    except OSError:
-        pass
+    except OSError as e:
+        print(
+            f"Failed to delete credentials at {CRED_PATH}: {e}",
+            file=sys.stderr,
+        )
+        return 1
     print("Logged out.")
     return 0
 
