@@ -22,12 +22,13 @@ A Claude Code plugin that ships <commands / skills / an MCP server> for creating
 - FastMCP (MCP Python SDK), Pydantic v2
   (`ConfigDict(extra='forbid', str_strip_whitespace=True)`)
 - `httpx.AsyncClient` for outbound HTTP
-- `ruff` + `ruff format`, `mypy --strict`
+- `ruff` + `ruff format`, `pyright` (strict mode)
 - `pytest` + `pytest-asyncio`
 
 ## Commands
 - Install dev deps: `uv sync`
 - Lint: `uv run ruff check . && uv run ruff format --check .`
+- Type-check: `uv run pyright`
 - Tests: `uv run pytest`
 - Eval suite: `uv run python evals/run.py`
 - Local plugin test: `claude --plugin-dir .` then `/reload-plugins` after edits

@@ -1,6 +1,6 @@
 {
     "name": "pluto-judge",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "description": "Create fine-tuned LLM-as-a-judge evaluators from labeled data using the Pluto platform",
     "author": {
         "name": "Plurai",
