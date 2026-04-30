@@ -5,8 +5,7 @@ from __future__ import annotations
 from typing import Annotated, Any, cast
 
 import httpx
-from mcp.server.fastmcp import Context
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
 

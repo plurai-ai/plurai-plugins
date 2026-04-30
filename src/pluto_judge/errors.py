@@ -14,6 +14,20 @@ from typing import Any, cast
 
 import httpx
 
+_LOGIN_PROMPT = "Run /pluto-judge:login or set PLUTO_API_KEY."
+
+
+class MissingApiKeyError(RuntimeError):
+    """Raised when no Pluto API key is configured.
+
+    Surfaced to tool callers so the model can prompt the user to run
+    ``/pluto-judge:login`` instead of retrying blindly.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(f"Pluto API key not set. {_LOGIN_PROMPT}")
+
+
 _ERROR_BODY_MAX_BYTES = 2000
 _ERROR_REDACT_KEYS: tuple[str, ...] = (
     "authorization",
@@ -61,9 +75,11 @@ def format_tool_error(exc: BaseException) -> dict[str, str]:
     auth subpackage:
       * `httpx.HTTPStatusError` — server returned a non-retryable status
       * `httpx.TransportError` — network/DNS/timeout failures after retries
-      * `RuntimeError` — auth refresh / chrome / broker dispatch failures
+      * `RuntimeError` — including `MissingApiKeyError` from the auth module
     """
     if isinstance(exc, httpx.HTTPStatusError):
+        if exc.response.status_code == 401:
+            return {"error": f"Pluto API key invalid or expired. {_LOGIN_PROMPT}"}
         return {"error": f"HTTP {exc.response.status_code}: {safe_error_body(exc)}"}
     if isinstance(exc, httpx.TransportError):
         return {"error": f"Network error reaching Pluto: {exc}"}
