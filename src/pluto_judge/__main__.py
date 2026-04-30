@@ -2,7 +2,7 @@
 
 Default mode runs the FastMCP stdio server. With a leading `auth` argument,
 forwards the rest to the auth subcommand CLI — e.g.
-``python -m pluto_judge auth login`` / ``status`` / ``logout``.
+``python -m pluto_judge auth login --key ak_…`` / ``status`` / ``logout``.
 """
 
 from __future__ import annotations

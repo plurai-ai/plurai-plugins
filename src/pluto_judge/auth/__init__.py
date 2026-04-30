@@ -3,6 +3,7 @@ from .auth import (
     bearer_headers,
     delete_api_key,
     load_api_key,
+    main,
     pluto_headers,
     save_api_key,
 )
@@ -12,6 +13,7 @@ __all__ = [
     "bearer_headers",
     "delete_api_key",
     "load_api_key",
+    "main",
     "pluto_headers",
     "save_api_key",
 ]

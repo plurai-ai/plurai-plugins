@@ -7,6 +7,7 @@ Tools reach it via `ctx.request_context.lifespan_context`.
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import AsyncGenerator
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
@@ -16,7 +17,7 @@ from mcp.server.fastmcp import FastMCP
 from .auth.auth import bearer_headers
 from .clients import AgentClient, PlutoClient
 from .config import get_settings
-from .errors import MissingApiKeyError
+from .errors import CorruptCredentialsError, MissingApiKeyError
 
 
 @dataclass
@@ -32,41 +33,42 @@ class ServerState:
 
 @asynccontextmanager
 async def lifespan(_server: FastMCP) -> AsyncGenerator[ServerState, None]:
-    """Build typed Pluto + Agent clients with a cached API key.
+    """Build typed Pluto + Agent clients backed by a cached API key.
 
     The key is resolved at startup if available and held in memory for
     normal requests (no per-request file I/O). If no key is configured at
-    startup, the cache stays empty and ``headers_provider`` resolves on the
-    first request — this lets the MCP server boot before the user has run
+    startup, the cache stays empty and the first request resolves it
+    lazily — this lets the MCP server boot before the user has run
     ``/pluto-judge:login``, so the login slash command can recover the
-    session without restarting Claude Code. On a 401 the client invokes
-    ``auth_refresh``, which re-reads env/file once so a fresh login is
-    picked up. If that retry also 401s, ``format_tool_error`` surfaces a
-    login prompt to the model.
+    session without restarting Claude Code.
 
     On shutdown, drains any in-flight background optimize tasks so they
-    don't run against a closed httpx client (which raises ``RuntimeError``
-    on the event loop at process exit).
+    don't run against a closed httpx client.
     """
     settings = get_settings()
-    # Try to resolve at startup, but don't crash if the user hasn't logged in
-    # yet — otherwise the MCP server fails to register tools and the user has
-    # no way to recover via /pluto-judge:login without restarting Claude Code.
+    cached_headers: dict[str, str] | None = None
     try:
-        initial_headers: dict[str, str] | None = bearer_headers()
+        cached_headers = bearer_headers()
     except MissingApiKeyError:
-        initial_headers = None
-    auth_state: dict[str, dict[str, str] | None] = {"headers": initial_headers}
+        print(
+            "pluto-judge: no API key at startup; tools will require /pluto-judge:login.",
+            file=sys.stderr,
+        )
+    except CorruptCredentialsError as e:
+        print(f"pluto-judge: {e}", file=sys.stderr)
 
     async def headers_provider() -> dict[str, str]:
-        headers = auth_state["headers"]
-        if headers is None:
-            headers = bearer_headers()
-            auth_state["headers"] = headers
-        return headers
+        nonlocal cached_headers
+        if cached_headers is None:
+            cached_headers = bearer_headers()
+        return cached_headers
 
     async def auth_refresh() -> None:
-        auth_state["headers"] = bearer_headers()
+        nonlocal cached_headers
+        # Clear first so a failed refresh leaves the cache empty rather
+        # than continuing to serve previously-valid (now stale) headers.
+        cached_headers = None
+        cached_headers = bearer_headers()
 
     async with AsyncExitStack() as stack:
         pluto = await stack.enter_async_context(
@@ -88,4 +90,10 @@ async def lifespan(_server: FastMCP) -> AsyncGenerator[ServerState, None]:
             yield state
         finally:
             if state.background_tasks:
-                await asyncio.gather(*state.background_tasks, return_exceptions=True)
+                results = await asyncio.gather(*state.background_tasks, return_exceptions=True)
+                for r in results:
+                    if isinstance(r, BaseException):
+                        print(
+                            f"pluto-judge: background task raised on shutdown: {r!r}",
+                            file=sys.stderr,
+                        )

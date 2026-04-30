@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from typing import Annotated, Any, Literal, cast
 
-import httpx
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
@@ -249,7 +248,7 @@ def register(mcp: FastMCP) -> None:
     ) -> Any:
         try:
             return await _search_evaluators(args, ctx)
-        except (httpx.HTTPStatusError, httpx.TransportError, RuntimeError) as e:
+        except Exception as e:
             return format_tool_error(e)
 
     @mcp.tool(
@@ -265,7 +264,7 @@ def register(mcp: FastMCP) -> None:
     async def pluto_get_results(args: GetResultsArgs, ctx: Context[Any, Any, Any]) -> Any:
         try:
             return await _get_results(args, ctx)
-        except (httpx.HTTPStatusError, httpx.TransportError, RuntimeError) as e:
+        except Exception as e:
             return format_tool_error(e)
 
     @mcp.tool(
@@ -283,7 +282,7 @@ def register(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         try:
             return await _create_api_key(args, ctx)
-        except (httpx.HTTPStatusError, httpx.TransportError, RuntimeError) as e:
+        except Exception as e:
             return format_tool_error(e)
 
     _ = (pluto_search_evaluators, pluto_get_results, pluto_create_api_key)
