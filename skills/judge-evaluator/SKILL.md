@@ -10,6 +10,8 @@ description: >
 
 The user wants to build an LLM-as-a-judge evaluator. Use the Pluto platform MCP tools.
 
+If any pluto tool fails with `Pluto API key not set.` or `Pluto API key invalid or expired.`, ask the user to run `/pluto-judge:login` and stop until they do.
+
 Call `pluto_search_evaluators` first to check if a relevant evaluator already exists. If one matches, ask (via `pluto_ask_user`) if they want to reuse it or create new. If reusing, provide the endpoint URL and API key.
 
 If creating new, call `pluto_start_judge`. For `task_description`: 1-2 short sentences. Include task + desired label names.

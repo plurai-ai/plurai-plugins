@@ -2,7 +2,7 @@
 
 Caps length, redacts secret-shaped JSON values. Operates on
 `httpx.Response`. Also exposes `format_tool_error` for tool wrappers, which
-turns transport / status / auth-refresh errors into a consistent
+turns transport / status / auth errors into a consistent
 ``{"error": ...}`` envelope rather than letting the FastMCP runtime turn
 them into opaque protocol errors.
 """
@@ -10,9 +10,40 @@ them into opaque protocol errors.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, cast
 
 import httpx
+
+_LOGIN_PROMPT = "Run /pluto-judge:login or set PLUTO_API_KEY."
+
+
+class MissingApiKeyError(RuntimeError):
+    """Raised when no Pluto API key is configured.
+
+    Surfaced to tool callers so the model can prompt the user to run
+    ``/pluto-judge:login`` instead of retrying blindly.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(f"Pluto API key not set. {_LOGIN_PROMPT}")
+
+
+class CorruptCredentialsError(RuntimeError):
+    """Raised when the credentials file exists but cannot be loaded.
+
+    Distinguished from :class:`MissingApiKeyError` so the user gets an
+    actionable message naming the broken file rather than the generic
+    "not logged in" prompt that masks the real cause.
+    """
+
+    def __init__(self, path: Path, reason: str) -> None:
+        self.path = path
+        super().__init__(
+            f"Pluto credentials file at {path} is unreadable: {reason}. "
+            "Run /pluto-judge:login to overwrite it."
+        )
+
 
 _ERROR_BODY_MAX_BYTES = 2000
 _ERROR_REDACT_KEYS: tuple[str, ...] = (
@@ -28,7 +59,7 @@ def safe_error_body(exc: httpx.HTTPStatusError) -> str:
     """Read an HTTP error body for client display: truncate and redact secrets."""
     try:
         raw: bytes = exc.response.content
-    except Exception:
+    except (httpx.ResponseNotRead, httpx.StreamConsumed, RuntimeError):
         return str(exc)
     body = raw[:_ERROR_BODY_MAX_BYTES].decode("utf-8", errors="replace")
     truncated = len(raw) > _ERROR_BODY_MAX_BYTES
@@ -55,18 +86,24 @@ def _redact(node: Any) -> None:
 
 
 def format_tool_error(exc: BaseException) -> dict[str, str]:
-    """Map a backend or auth exception to a tool-result error envelope.
+    """Map any tool exception to a `{"error": ...}` envelope.
 
-    Covers the classes of failure that escape from `BaseHttpClient` and the
-    auth subpackage:
-      * `httpx.HTTPStatusError` — server returned a non-retryable status
-      * `httpx.TransportError` — network/DNS/timeout failures after retries
-      * `RuntimeError` — auth refresh / chrome / broker dispatch failures
+    Recognized classes get tailored messages (auth, HTTP status, transport,
+    runtime). Anything else falls through to a generic envelope so tools
+    never propagate raw exceptions to the FastMCP runtime — that would
+    surface as an opaque protocol error with no actionable detail for the
+    model.
     """
+    if isinstance(exc, MissingApiKeyError):
+        return {"error": str(exc)}
+    if isinstance(exc, CorruptCredentialsError):
+        return {"error": str(exc)}
     if isinstance(exc, httpx.HTTPStatusError):
+        if exc.response.status_code == 401:
+            return {"error": f"Pluto API key invalid or expired. {_LOGIN_PROMPT}"}
         return {"error": f"HTTP {exc.response.status_code}: {safe_error_body(exc)}"}
     if isinstance(exc, httpx.TransportError):
         return {"error": f"Network error reaching Pluto: {exc}"}
     if isinstance(exc, RuntimeError):
         return {"error": f"Pluto request failed: {exc}"}
-    raise exc
+    return {"error": f"Unexpected {type(exc).__name__}: {exc}"}

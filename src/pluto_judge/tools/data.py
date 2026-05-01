@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, cast
 
-import httpx
-from mcp.server.fastmcp import Context
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -68,7 +66,7 @@ def register(mcp: FastMCP) -> None:
         )
         try:
             await state.pluto.upload_example_file(args.example_set_id, request, timeout=60.0)
-        except (httpx.HTTPStatusError, httpx.TransportError, RuntimeError) as e:
+        except Exception as e:
             return format_tool_error(e)
         return {"status": "uploaded", "count": len(args.records), "source": args.source}
 

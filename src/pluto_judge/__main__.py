@@ -2,21 +2,20 @@
 
 Default mode runs the FastMCP stdio server. With a leading `auth` argument,
 forwards the rest to the auth subcommand CLI — e.g.
-``python -m pluto_judge auth login`` / ``status`` / ``logout``.
+``python -m pluto_judge auth login --key ak_…`` / ``status`` / ``logout``.
 """
 
 from __future__ import annotations
 
 import sys
-from typing import Any, cast
 
-from . import auth as _auth
+from .auth.auth import main as auth_main
 from .server import mcp
 
 
 def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "auth":
-        return cast(Any, _auth.main)(sys.argv[2:])
+        return auth_main(sys.argv[2:])
     mcp.run()
     return 0
 
