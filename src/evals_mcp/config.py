@@ -25,7 +25,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    api_base: str = "https://pluto.stg.plurai.ai"
+    api_base: str = "https://app.plurai.ai"
     run_base: str | None = None
 
     # Where the user's API key is persisted by `/login`. Resolved with

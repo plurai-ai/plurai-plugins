@@ -7,17 +7,19 @@ optimize when the classifier has already-completed or in-progress results.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import Annotated, Any, Literal, TypedDict, cast
 
 import httpx
 import structlog
+from mcp.server.elicitation import AcceptedElicitation
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.shared.exceptions import McpError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from ..clients import AgentEvent, GetClassifierResponse, OptimizationView
-from ..config import get_settings
+from ..config import Settings, get_settings
 from ..errors import format_tool_error
 from ..state import ServerState
 
@@ -85,36 +87,67 @@ class ChatMessage(TypedDict):
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 
-def _extract_conversation(events: list[AgentEvent]) -> list[ChatMessage]:
-    """Pull the latest MESSAGES_SNAPSHOT from the event stream."""
-    conversation: list[ChatMessage] = []
-    for event in events:
-        if event.type != "MESSAGES_SNAPSHOT":
-            continue
-        extra = event.model_dump(exclude={"type"})
-        messages = cast(list[dict[str, Any]], extra.get("messages") or [])
-        conversation = [
-            ChatMessage(role=str(m.get("role", "")), content=str(m.get("content", "")))
-            for m in messages
-            if m.get("content") and m.get("content") != "..."
-        ]
-    return conversation
+@dataclass(frozen=True)
+class AgentStateSnapshot:
+    """Latest values pulled from the agent's STATE_SNAPSHOT events.
 
+    A non-null ``commit_id`` is the agent's signal that the initial flow
+    (synthetic data generation) is complete — it's the ID of the committed
+    example set the user can now review.
+    """
 
-def _extract_classifier_id(events: list[AgentEvent]) -> str | None:
-    """Pull the latest classifier_id from STATE_SNAPSHOT events, if any."""
     classifier_id: str | None = None
+    commit_id: str | None = None
+
+
+@dataclass(frozen=True)
+class RunResult:
+    conversation: list[ChatMessage]
+    snapshot: AgentStateSnapshot
+
+
+def _parse_run(events: list[AgentEvent]) -> RunResult:
+    """Single pass over the event stream: latest MESSAGES_SNAPSHOT wins for
+    conversation; latest STATE_SNAPSHOT values win for snapshot."""
+    conversation: list[ChatMessage] = []
+    classifier_id: str | None = None
+    commit_id: str | None = None
+    event_types: dict[str, int] = {}
+    last_snapshot_keys: list[str] = []
     for event in events:
-        if event.type != "STATE_SNAPSHOT":
-            continue
-        extra = event.model_dump(exclude={"type"})
-        snapshot = extra.get("snapshot")
-        if not isinstance(snapshot, dict):
-            continue
-        cid = cast(dict[str, Any], snapshot).get("classifier_id")
-        if isinstance(cid, str):
-            classifier_id = cid
-    return classifier_id
+        event_types[event.type] = event_types.get(event.type, 0) + 1
+        if event.type == "MESSAGES_SNAPSHOT":
+            extra = event.model_dump(exclude={"type"})
+            messages = cast(list[dict[str, Any]], extra.get("messages") or [])
+            conversation = [
+                ChatMessage(role=str(m.get("role", "")), content=str(m.get("content", "")))
+                for m in messages
+                if m.get("content") and m.get("content") != "..."
+            ]
+        elif event.type == "STATE_SNAPSHOT":
+            extra = event.model_dump(exclude={"type"})
+            snapshot = extra.get("snapshot")
+            if not isinstance(snapshot, dict):
+                continue
+            snap = cast(dict[str, Any], snapshot)
+            last_snapshot_keys = sorted(snap.keys())
+            cid = snap.get("classifier_id")
+            if isinstance(cid, str):
+                classifier_id = cid
+            commit = snap.get("commit_id")
+            if isinstance(commit, str) and commit:
+                commit_id = commit
+    logger.info(
+        "agent_run_parsed",
+        event_types=event_types,
+        last_snapshot_keys=last_snapshot_keys,
+        classifier_id=classifier_id,
+        commit_id=commit_id,
+    )
+    return RunResult(
+        conversation=conversation,
+        snapshot=AgentStateSnapshot(classifier_id=classifier_id, commit_id=commit_id),
+    )
 
 
 def _last_assistant(conversation: list[ChatMessage]) -> str:
@@ -131,11 +164,11 @@ def _state_of(ctx: Context[Any, Any, Any]) -> ServerState:
 # ── Optimization fast-path (pre-send check) ──────────────────────────────
 
 
-async def _check_optimization_status(state: ServerState, thread_id: str) -> dict[str, Any] | None:
+async def _check_optimization_status(state: ServerState) -> dict[str, Any] | None:
     """If a classifier already has results / is mid-optimization, return a
     short-circuit response. Returning None means the caller should send the
     message to the agent normally."""
-    classifier_id = state.classifier_by_thread.get(thread_id)
+    classifier_id = state.classifier_id
     if not classifier_id:
         return None
 
@@ -191,117 +224,86 @@ async def _fetch_optimization(
     return None
 
 
-# ── Tool implementations ─────────────────────────────────────────────────
+async def _handle_optimize(
+    state: ServerState, settings: Settings, thread_id: str, message: str
+) -> dict[str, Any]:
+    """Optimize fast-path: short-circuit if a classifier already has results
+    or is mid-optimization; otherwise fire-and-forget the agent run.
 
+    Optimization takes ~2 min (LLM) / ~20 min (SLM), so we don't await it —
+    the task ref is held in state.background_tasks so asyncio doesn't GC it.
+    """
+    status = await _check_optimization_status(state)
+    if status:
+        return status
 
-async def _start_judge(args: StartJudgeArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
-    state = _state_of(ctx)
-    settings = get_settings()
+    async def _run_optimize() -> None:
+        try:
+            await state.agent.run_agent(thread_id, message, timeout=600.0)
+        except (httpx.HTTPError, OSError):
+            logger.exception(
+                "Background optimize failed",
+                thread_id=thread_id,
+                message=message[:120],
+            )
 
-    thread = await state.platform.create_thread()
-    state.classifier_by_thread.pop(thread.id, None)
-
-    events = await state.agent.run_agent(thread.id, args.task_description)
-    conversation = _extract_conversation(events)
-    agent_response = _last_assistant(conversation)
-
-    state.has_questions = True
+    task = asyncio.create_task(_run_optimize())
+    state.background_tasks.add(task)
+    task.add_done_callback(state.background_tasks.discard)
 
     return {
-        "thread_id": thread.id,
-        "example_set_id": thread.example_set_id,
-        "url": f"{settings.api_base.rstrip('/')}/thread/{thread.id}",
-        "agent_response": agent_response,
-        "action_required": "PRESENT_QUESTIONS_TO_USER",
-        "instructions": (
-            "The agent returned refinement questions. "
-            "Call evals_ask_user with the questions rephrased as options. "
-            "Do NOT present the questions as text."
+        "status": "optimization_started",
+        "message": (
+            f"Optimization '{message}' triggered for thread {thread_id}. "
+            "It runs in the background (~2 min for LLM, ~20 min for SLM). "
+            "Use evals_get_results later to check results."
         ),
+        "thread_id": thread_id,
+        "url": f"{settings.api_base.rstrip('/')}/thread/{thread_id}",
     }
 
 
-async def _send_message(args: SendMessageArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
-    state = _state_of(ctx)
-    settings = get_settings()
-    thread_id = args.thread_id
-    message = args.message
+def _fallback_payload(questions: list[AskUserQuestion], state: ServerState) -> dict[str, Any]:
+    """When elicitation is declined / unsupported, return a payload the model
+    can forward to the host's AskUserQuestion tool.
 
-    if message.strip().lower() == "optimize":
-        return {
-            "error": (
-                "Do not send 'Optimize' alone. You must send exactly "
-                "'Optimize [LLM]' or 'Optimize [SLM]'."
-            )
+    The optimization-step reminder is attached only after the initial flow
+    is done (signalled by ``state.commit_id`` being set) — pre-commit the
+    model is forwarding agent refinement questions and the reminder doesn't
+    apply.
+    """
+    ask_user_questions = [
+        {
+            "question": q.question,
+            "header": q.question[:12],
+            "options": [{"label": o.label, "description": o.value} for o in q.options],
+            "multiSelect": False,
         }
-
-    is_optimize = message.strip().lower().startswith("optimize")
-    if is_optimize:
-        status = await _check_optimization_status(state, thread_id)
-        if status:
-            return status
-
-    if is_optimize:
-        # Optimization runs ~2 min (LLM) / ~20 min (SLM). Run as fire-and-forget
-        # so the tool call returns immediately; reference is held in
-        # state.background_tasks so asyncio doesn't GC the task mid-flight.
-        async def _run_optimize() -> None:
-            try:
-                await state.agent.run_agent(thread_id, message, timeout=600.0)
-            except (httpx.HTTPError, OSError):
-                logger.exception(
-                    "Background optimize failed",
-                    thread_id=thread_id,
-                    message=message[:120],
-                )
-
-        task = asyncio.create_task(_run_optimize())
-        state.background_tasks.add(task)
-        task.add_done_callback(state.background_tasks.discard)
-
-        return {
-            "status": "optimization_started",
-            "message": (
-                f"Optimization '{message}' triggered for thread {thread_id}. "
-                "It runs in the background (~2 min for LLM, ~20 min for SLM). "
-                "Use evals_get_results later to check results."
-            ),
-            "thread_id": thread_id,
-            "url": f"{settings.api_base.rstrip('/')}/thread/{thread_id}",
-        }
-
-    events = await state.agent.run_agent(thread_id, message)
-    conversation = _extract_conversation(events)
-    classifier_id = _extract_classifier_id(events)
-    agent_response = _last_assistant(conversation)
-
-    result: dict[str, Any] = {
-        "agent_response": agent_response,
-        "message_count": len(conversation),
-    }
-    if classifier_id:
-        result["classifier_id"] = classifier_id
-        state.classifier_by_thread[thread_id] = classifier_id
-
-    if "?" in agent_response and not classifier_id:
-        state.has_questions = True
-        result["action_required"] = "PRESENT_QUESTIONS_TO_USER"
-        result["instructions"] = (
-            "The agent returned refinement questions. You MUST call evals_ask_user to present "
-            "them. Do NOT answer these questions yourself. Do NOT output any text before "
-            "calling evals_ask_user.\n\n"
-            "FORMAT RULES:\n"
-            "- Labels question: option 1 label = the EXACT label names from brackets joined "
-            "with ' / ' plus '(Recommended)'. Option 2 = suggest SPECIFIC alternative label "
-            "names relevant to the task (e.g. 'pass / fail', 'safe / unsafe', "
-            "'grounded / hallucinated'). Do NOT just say 'Suggest different labels' — provide "
-            "actual alternative names.\n"
-            "- Other questions: 2-3 short options, labels under 8 words."
+        for q in questions
+    ]
+    extra = ""
+    if state.commit_id is not None:
+        # In the post-flow-done phase the model drives questions; the
+        # most consequential one is SLM-vs-LLM where the follow-up
+        # send_message must use EXACT formatting. Attach with conditional
+        # framing so it's a no-op for the integration-code question.
+        extra = (
+            " IF this is the optimization-type question (SLM vs LLM), then after the user "
+            "chooses, call evals_send_message with EXACTLY message='Optimize [LLM]' or "
+            "message='Optimize [SLM]'. One call only. These are hardcoded strings — do not "
+            "modify them."
         )
-    return result
-
-
-# ── ask_user (elicitation) ───────────────────────────────────────────────
+    return {
+        "action": "elicitation_unavailable",
+        "fallback": "AskUserQuestion",
+        "instructions": (
+            "Elicitation is not available in this environment. "
+            "You MUST now call the AskUserQuestion tool with the questions below. "
+            "Use ToolSearch to load it first if needed. Do NOT answer the questions yourself."
+            + extra
+        ),
+        "askUserQuestions": ask_user_questions,
+    }
 
 
 def _build_elicit_form(questions: list[AskUserQuestion]) -> type[BaseModel]:
@@ -332,50 +334,102 @@ def _build_elicit_form(questions: list[AskUserQuestion]) -> type[BaseModel]:
     )
 
 
-def _is_optimization_question(questions: list[AskUserQuestion]) -> bool:
-    for q in questions:
-        lowered = q.question.lower()
-        if "optim" in lowered or "slm" in lowered or "llm" in lowered:
-            return True
-    return False
+# ── Tool implementations ─────────────────────────────────────────────────
 
 
-def _fallback_payload(questions: list[AskUserQuestion]) -> dict[str, Any]:
-    """When elicitation is declined / unsupported, return a payload the model
-    can forward to the host's AskUserQuestion tool."""
-    ask_user_questions = [
-        {
-            "question": q.question,
-            "header": q.question[:12],
-            "options": [{"label": o.label, "description": o.value} for o in q.options],
-            "multiSelect": False,
-        }
-        for q in questions
-    ]
-    extra = ""
-    if _is_optimization_question(questions):
-        extra = (
-            " IMPORTANT: After the user chooses, call evals_send_message with EXACTLY "
-            "message='Optimize [LLM]' or message='Optimize [SLM]'. One call only. These are "
-            "hardcoded strings — do not modify them."
-        )
+async def _start_judge(args: StartJudgeArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
+    state = _state_of(ctx)
+    settings = get_settings()
+
+    thread = await state.platform.create_thread()
+    state.classifier_id = None
+
+    events = await state.agent.run_agent(thread.id, args.task_description)
+    run = _parse_run(events)
+    agent_response = _last_assistant(run.conversation)
+    state.commit_id = run.snapshot.commit_id
+    state.has_questions = True
+
     return {
-        "action": "elicitation_unavailable",
-        "fallback": "AskUserQuestion",
+        "thread_id": thread.id,
+        "example_set_id": thread.example_set_id,
+        "url": f"{settings.api_base.rstrip('/')}/thread/{thread.id}",
+        "agent_response": agent_response,
+        "action_required": "PRESENT_QUESTIONS_TO_USER",
         "instructions": (
-            "Elicitation is not available in this environment. "
-            "You MUST now call the AskUserQuestion tool with the questions below. "
-            "Use ToolSearch to load it first if needed. Do NOT answer the questions yourself."
-            + extra
+            "The agent returned refinement questions. "
+            "Call evals_ask_user with the questions rephrased as options. "
+            "Do NOT present the questions as text."
         ),
-        "askUserQuestions": ask_user_questions,
     }
 
 
+async def _send_message(args: SendMessageArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
+    state = _state_of(ctx)
+    settings = get_settings()
+    thread_id = args.thread_id
+    message = args.message
+    normalized = message.strip().lower()
+
+    if normalized == "optimize":
+        return {
+            "error": (
+                "Do not send 'Optimize' alone. You must send exactly "
+                "'Optimize [LLM]' or 'Optimize [SLM]'."
+            )
+        }
+
+    if normalized.startswith("optimize"):
+        return await _handle_optimize(state, settings, thread_id, message)
+
+    events = await state.agent.run_agent(thread_id, message)
+    run = _parse_run(events)
+    classifier_id = run.snapshot.classifier_id
+    agent_response = _last_assistant(run.conversation)
+    state.commit_id = run.snapshot.commit_id
+
+    result: dict[str, Any] = {
+        "agent_response": agent_response,
+        "message_count": len(run.conversation),
+    }
+    if classifier_id:
+        result["classifier_id"] = classifier_id
+        state.classifier_id = classifier_id
+
+    # Re-arm so the model can call evals_ask_user next, whether the agent
+    # came back with another refinement question or just finished the
+    # initial flow and the next step is the SLM/LLM choice.
+    state.has_questions = True
+
+    if state.commit_id is not None:
+        result["url"] = f"{settings.api_base.rstrip('/')}/thread/{thread_id}"
+        result["instructions"] = (
+            "The synthetic examples are ready. You MUST do all three in this turn: "
+            "(1) show the user the agent_response text verbatim; "
+            "(2) share the url as a clickable markdown link, describing it as the "
+            "place to review/edit the generated data on the Plurai platform; "
+            "(3) call evals_ask_user with the optimization-type question — options "
+            '"SLM — recommended for production, fine-tuned model (~20 min)" '
+            '(value "SLM") and "LLM — recommended for testing/small scale, '
+            'prompt-based (~2 min)" (value "LLM"). '
+            "Do NOT add any extra confirmation question before the optimization ask."
+        )
+    return result
+
+
+# ── ask_user (elicitation) ───────────────────────────────────────────────
 async def _ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
     state = _state_of(ctx)
+    # Single gate: only allow ask_user right after start_judge or a
+    # send_message that re-armed has_questions. Stops the model from
+    # injecting its own questions before the flow has begun.
     if not state.has_questions:
-        return {"error": ("You must call evals_start_judge first. Do NOT ask your own questions.")}
+        return {
+            "error": (
+                "You must call evals_start_judge first. "
+                "Do NOT ask your own questions before the flow has begun."
+            )
+        }
     state.has_questions = False
     questions = args.questions
 
@@ -384,7 +438,7 @@ async def _ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str,
         result = await ctx.elicit(message="Please answer these questions:", schema=form_model)
     except McpError:
         # Host doesn't implement elicitation. Fall back.
-        return _fallback_payload(questions)
+        return _fallback_payload(questions, state)
     except Exception:
         # Unknown failure (transport, schema bug, internal). Log so we can
         # debug in environments that should support elicitation, and still
@@ -393,21 +447,14 @@ async def _ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str,
             "Elicitation failed unexpectedly; falling back",
             question_count=len(questions),
         )
-        return _fallback_payload(questions)
-
-    action: Any = getattr(result, "action", None)
-    if action == "accept":
-        data: Any = getattr(result, "data", None)
-        data_dict: dict[str, Any] = {}
-        dump = getattr(data, "model_dump", None)
-        if callable(dump):
-            data_dict = cast(dict[str, Any], dump())
-        elif isinstance(data, dict):
-            data_dict = cast(dict[str, Any], data)
-        answers = {q.question: data_dict.get(f"q{i + 1}", "") for i, q in enumerate(questions)}
-        return {"answers": answers, "action": "accepted"}
-
-    return _fallback_payload(questions)
+        return _fallback_payload(questions, state)
+    # Decline / cancel both fall through to the AskUserQuestion fallback so
+    # the user isn't stranded — same shape as elicit-unavailable.
+    if not isinstance(result, AcceptedElicitation):
+        return _fallback_payload(questions, state)
+    data_dict = result.data.model_dump()
+    answers = {q.question: data_dict.get(f"q{i + 1}", "") for i, q in enumerate(questions)}
+    return {"answers": answers, "action": "accepted"}
 
 
 # ── Registration ─────────────────────────────────────────────────────────

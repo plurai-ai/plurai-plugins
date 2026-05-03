@@ -24,8 +24,16 @@ from .errors import CorruptCredentialsError, MissingApiKeyError
 class ServerState:
     platform: PlatformClient
     agent: AgentClient
-    classifier_by_thread: dict[str, str] = field(default_factory=lambda: {})
+    # Latest classifier_id reported by the agent via STATE_SNAPSHOT. One
+    # classifier per session; cleared at start_judge.
+    classifier_id: str | None = None
     has_questions: bool = False
+    # Mirror of the agent's STATE_SNAPSHOT.commit_id. Non-null means the
+    # initial flow (synthetic data generation) is done — the agent has
+    # committed an example set. Drives URL surfacing in _send_message and
+    # the SLM/LLM format hint in the ask_user fallback path. Not used as
+    # a gate.
+    commit_id: str | None = None
     # Holds references to background optimize tasks so asyncio doesn't GC
     # them mid-flight. The set is cleaned up by the task's own done callback.
     background_tasks: set[asyncio.Task[None]] = field(default_factory=lambda: set())

@@ -245,3 +245,124 @@ async def test_ask_user_falls_back_when_elicit_declined(ctx: Any) -> None:
     assert out["fallback"] == "AskUserQuestion"
     # has_questions should be reset whether we accepted or fell back.
     assert ctx.request_context.lifespan_context.has_questions is False
+
+
+# ── ask_user: SLM/LLM step ──────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_ask_user_allowed_for_slm_llm_step(ctx: Any) -> None:
+    """The SLM/LLM step reaches ask_user the same way refinement does:
+    the prior send_message re-armed has_questions. ``commit_id`` only
+    affects the fallback hint, not the gate."""
+    state = ctx.request_context.lifespan_context
+    state.has_questions = True
+    state.commit_id = "commit-xyz"
+
+    out = await _ask_user(
+        AskUserArgs(
+            questions=[
+                AskUserQuestion(
+                    question="LLM or SLM?",
+                    options=[
+                        AskUserOption(label="LLM", value="LLM"),
+                        AskUserOption(label="SLM", value="SLM"),
+                    ],
+                )
+            ]
+        ),
+        ctx,
+    )
+    # Should NOT be a gating error — falls back to AskUserQuestion (decline).
+    assert "error" not in out
+    assert out["action"] == "elicitation_unavailable"
+
+
+# ── send_message: surfaces url + instruction when initial flow completes ─
+
+
+@pytest.mark.asyncio
+async def test_send_message_surfaces_url_when_commit_id_present(httpx_mock: Any, ctx: Any) -> None:
+    """Reproduces the post-data-generation step: the agent emits a
+    ``commit_id`` in STATE_SNAPSHOT to mark the synthetic example set as
+    committed. The response must surface a thread URL and a follow-up
+    instruction, and re-arm has_questions for the next ask_user call."""
+    httpx_mock.add_response(
+        url=AGENT_API,
+        method="POST",
+        content=_sse_body(
+            [
+                {
+                    "type": "MESSAGES_SNAPSHOT",
+                    "messages": [
+                        {"role": "user", "content": "answers"},
+                        {
+                            "role": "assistant",
+                            "content": "I've generated 16 synthetic examples for testing.",
+                        },
+                    ],
+                },
+                {
+                    "type": "STATE_SNAPSHOT",
+                    "snapshot": {"commit_id": "commit-abc"},
+                },
+            ]
+        ),
+        headers={"content-type": "text/event-stream"},
+    )
+
+    state = ctx.request_context.lifespan_context
+    state.has_questions = False
+    state.commit_id = None
+
+    out = await _send_message(
+        SendMessageArgs(thread_id="thread-1", message="Yes, labels are fine."),
+        ctx,
+    )
+
+    assert "url" in out
+    assert out["url"].endswith("/thread/thread-1")
+    assert "instructions" in out
+    instructions = out["instructions"]
+    # Must direct the orchestrator to surface the URL and ask SLM vs LLM in
+    # the same turn — no separate review-confirmation gate.
+    assert "review/edit" in instructions
+    assert "evals_ask_user" in instructions
+    assert "SLM" in instructions and "LLM" in instructions
+    assert "Ready to optimize" not in instructions
+    assert "review-confirm" not in instructions.lower()
+    assert state.commit_id == "commit-abc"
+    # Re-armed so the next ask_user (optimization choice) is allowed through.
+    assert state.has_questions is True
+
+
+@pytest.mark.asyncio
+async def test_send_message_no_url_when_no_commit_id(httpx_mock: Any, ctx: Any) -> None:
+    """During refinement (no ``commit_id`` yet), no url is surfaced —
+    that's reserved for the post-data-generation transition."""
+    httpx_mock.add_response(
+        url=AGENT_API,
+        method="POST",
+        content=_sse_body(
+            [
+                {
+                    "type": "MESSAGES_SNAPSHOT",
+                    "messages": [
+                        {"role": "user", "content": "task"},
+                        {"role": "assistant", "content": "What labels do you want?"},
+                    ],
+                },
+            ]
+        ),
+        headers={"content-type": "text/event-stream"},
+    )
+
+    state = ctx.request_context.lifespan_context
+    state.has_questions = False
+    state.commit_id = None
+
+    out = await _send_message(SendMessageArgs(thread_id="thread-1", message="more context"), ctx)
+    assert "url" not in out
+    assert state.commit_id is None
+    # Refinement question detected → has_questions re-armed via the '?' branch.
+    assert state.has_questions is True

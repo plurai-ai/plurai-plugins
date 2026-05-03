@@ -20,9 +20,11 @@ If creating new, call `evals_start_judge`. For `task_description`: 1-2 short sen
 
 Then follow the `instructions` field in the response — it tells you to call `evals_ask_user`.
 
+**Surfacing progress to the user.** After every `evals_send_message`, show the user the `agent_response` text verbatim so they see what the platform is doing (e.g. "I've generated 16 synthetic examples..."). Whenever a response includes `url`, you MUST display it to the user as a clickable markdown link in that turn — never silently move on.
+
 After the user answers:
 1. Compose answers into a message, call `evals_send_message`.
-2. Call `evals_ask_user` to ask optimization type. Options: "SLM — recommended for production, fine-tuned model (~20 min)" and "LLM — recommended for testing/small scale, prompt-based (~2 min)".
+2. **Surface the Data Canvas link, then ask about optimization.** Once the response includes `url`, share it as a clickable markdown link describing it as the place to review/edit the generated data, then in the same turn call `evals_ask_user` with options `"SLM — recommended for production, fine-tuned model (~20 min)"` and `"LLM — recommended for testing/small scale, prompt-based (~2 min)"`. Do not add any extra confirmation question before this ask.
 3. Call `evals_send_message` with EXACTLY `Optimize [LLM]` or `Optimize [SLM]` based on user's choice. These are hardcoded strings — do not modify them. Only one call needed.
 4. Call `evals_get_results` with classifier_id. Show baseline vs optimized metrics (accuracy, precision, recall) and the improvement delta for each.
 5. Call `evals_ask_user` to ask about API key and code integration.
