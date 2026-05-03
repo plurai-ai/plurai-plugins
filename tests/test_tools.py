@@ -1,5 +1,5 @@
 # pyright: reportPrivateUsage=false
-"""Tool-level tests against a mocked Pluto backend."""
+"""Tool-level tests against a mocked Plurai backend."""
 
 from __future__ import annotations
 
@@ -9,16 +9,16 @@ from typing import Any
 import httpx
 import pytest
 
-from pluto_judge.clients.agent import RUN_PATH
-from pluto_judge.config import get_settings
-from pluto_judge.errors import safe_error_body
-from pluto_judge.tools.classifiers import (
+from evals_mcp.clients.agent import RUN_PATH
+from evals_mcp.config import get_settings
+from evals_mcp.errors import safe_error_body
+from evals_mcp.tools.classifiers import (
     GetResultsArgs,
     SearchEvaluatorsArgs,
     _get_results,
     _search_evaluators,
 )
-from pluto_judge.tools.judge import (
+from evals_mcp.tools.judge import (
     AskUserArgs,
     AskUserOption,
     AskUserQuestion,
@@ -30,7 +30,7 @@ from pluto_judge.tools.judge import (
 )
 
 _settings = get_settings()
-PLUTO_API = _settings.pluto_api
+PLATFORM_API = _settings.platform_api
 AGENT_API = f"{_settings.agent_api_base}{RUN_PATH}"
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -84,17 +84,17 @@ async def test_search_evaluators_paginates_and_renders_markdown(httpx_mock: Any,
         }
         for i in range(5)
     ]
-    httpx_mock.add_response(url=f"{PLUTO_API}/classifiers", method="GET", json={"items": items})
+    httpx_mock.add_response(url=f"{PLATFORM_API}/classifiers", method="GET", json={"items": items})
     # Per-classifier "has_optimization" probes — return 404 so flag = False.
     for slug in (f"id-{i}" for i in range(2)):
         httpx_mock.add_response(
-            url=f"{PLUTO_API}/classifiers/{slug}/versions/1.0.0/optimization",
+            url=f"{PLATFORM_API}/classifiers/{slug}/versions/1.0.0/optimization",
             method="GET",
             status_code=404,
         )
     for slug in (f"slug-{i}" for i in range(2)):
         httpx_mock.add_response(
-            url=f"{PLUTO_API}/classifiers/{slug}/versions/1.0.0/optimization",
+            url=f"{PLATFORM_API}/classifiers/{slug}/versions/1.0.0/optimization",
             method="GET",
             status_code=404,
         )
@@ -119,14 +119,14 @@ async def test_search_evaluators_json_format(httpx_mock: Any, ctx: Any) -> None:
             "createdAt": "2026-01-01",
         }
     ]
-    httpx_mock.add_response(url=f"{PLUTO_API}/classifiers", method="GET", json={"items": items})
+    httpx_mock.add_response(url=f"{PLATFORM_API}/classifiers", method="GET", json={"items": items})
     httpx_mock.add_response(
-        url=f"{PLUTO_API}/classifiers/id-0/versions/1.0.0/optimization",
+        url=f"{PLATFORM_API}/classifiers/id-0/versions/1.0.0/optimization",
         method="GET",
         status_code=404,
     )
     httpx_mock.add_response(
-        url=f"{PLUTO_API}/classifiers/slug-0/versions/1.0.0/optimization",
+        url=f"{PLATFORM_API}/classifiers/slug-0/versions/1.0.0/optimization",
         method="GET",
         status_code=404,
     )
@@ -147,17 +147,17 @@ async def test_get_results_returns_empty_metrics_when_no_optimization(
     httpx_mock: Any, ctx: Any
 ) -> None:
     httpx_mock.add_response(
-        url=f"{PLUTO_API}/classifiers/c-1",
+        url=f"{PLATFORM_API}/classifiers/c-1",
         method="GET",
         json={"slug": "s-1", "defaultVersion": {"number": "1.0.0"}},
     )
     httpx_mock.add_response(
-        url=f"{PLUTO_API}/classifiers/c-1/versions/1.0.0/optimization",
+        url=f"{PLATFORM_API}/classifiers/c-1/versions/1.0.0/optimization",
         method="GET",
         status_code=404,
     )
     httpx_mock.add_response(
-        url=f"{PLUTO_API}/classifiers/s-1/versions/1.0.0/optimization",
+        url=f"{PLATFORM_API}/classifiers/s-1/versions/1.0.0/optimization",
         method="GET",
         status_code=404,
     )
@@ -173,7 +173,7 @@ async def test_get_results_returns_empty_metrics_when_no_optimization(
 @pytest.mark.asyncio
 async def test_start_judge_happy_path(httpx_mock: Any, ctx: Any) -> None:
     httpx_mock.add_response(
-        url=f"{PLUTO_API}/threads",
+        url=f"{PLATFORM_API}/threads",
         method="POST",
         json={"id": "thread-1", "exampleSetId": "es-1"},
     )

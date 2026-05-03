@@ -42,7 +42,7 @@ class SearchEvaluatorsArgs(BaseModel):
 class GetResultsArgs(BaseModel):
     model_config = _StrictModel
     classifier_id: Annotated[
-        str, Field(description="Classifier ID returned by pluto_send_message.")
+        str, Field(description="Classifier ID returned by evals_send_message.")
     ]
     response_format: Annotated[
         ResponseFormat,
@@ -72,7 +72,7 @@ async def _has_optimization(
     state: ServerState, classifier_uuid: str, slug: str, version: str
 ) -> bool:
     for identifier in (classifier_uuid, slug):
-        if (await state.pluto.get_optimization(identifier, version)) is not None:
+        if (await state.platform.get_optimization(identifier, version)) is not None:
             return True
     return False
 
@@ -81,7 +81,7 @@ async def _fetch_optimization(
     state: ServerState, classifier_uuid: str, slug: str, version: str
 ) -> OptimizationView | None:
     for identifier in (classifier_uuid, slug):
-        opt = await state.pluto.get_optimization(identifier, version)
+        opt = await state.platform.get_optimization(identifier, version)
         if opt is not None:
             return opt
     return None
@@ -153,7 +153,7 @@ def _format_get_results_markdown(payload: dict[str, Any]) -> str:
 async def _search_evaluators(args: SearchEvaluatorsArgs, ctx: Context[Any, Any, Any]) -> Any:
     state = _state(ctx)
     settings = get_settings()
-    listing = await state.pluto.list_classifiers()
+    listing = await state.platform.list_classifiers()
     items = listing.items
     page = items[args.offset : args.offset + args.limit]
 
@@ -199,7 +199,7 @@ async def _search_evaluators(args: SearchEvaluatorsArgs, ctx: Context[Any, Any, 
 async def _get_results(args: GetResultsArgs, ctx: Context[Any, Any, Any]) -> Any:
     state = _state(ctx)
     settings = get_settings()
-    classifier: GetClassifierResponse = await state.pluto.get_classifier(args.classifier_id)
+    classifier: GetClassifierResponse = await state.platform.get_classifier(args.classifier_id)
     slug = classifier.slug
     version = classifier.default_version.number if classifier.default_version else "1.0.0"
 
@@ -222,7 +222,7 @@ async def _get_results(args: GetResultsArgs, ctx: Context[Any, Any, Any]) -> Any
 
 async def _create_api_key(args: CreateApiKeyArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
     state = _state(ctx)
-    result = await state.pluto.create_api_key(args.name)
+    result = await state.platform.create_api_key(args.name)
     return {"api_key": result.secret, "key_id": result.id}
 
 
@@ -231,9 +231,9 @@ async def _create_api_key(args: CreateApiKeyArgs, ctx: Context[Any, Any, Any]) -
 
 def register(mcp: FastMCP) -> None:
     @mcp.tool(
-        name="pluto_search_evaluators",
+        name="evals_search_evaluators",
         description=(
-            "Search existing evaluators on the Pluto platform. Call this first to check if a "
+            "Search existing evaluators on the Plurai platform. Call this first to check if a "
             "relevant evaluator already exists before creating a new one."
         ),
         annotations=ToolAnnotations(
@@ -243,7 +243,7 @@ def register(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
-    async def pluto_search_evaluators(
+    async def evals_search_evaluators(
         args: SearchEvaluatorsArgs, ctx: Context[Any, Any, Any]
     ) -> Any:
         try:
@@ -252,7 +252,7 @@ def register(mcp: FastMCP) -> None:
             return format_tool_error(e)
 
     @mcp.tool(
-        name="pluto_get_results",
+        name="evals_get_results",
         description="Get optimization results (accuracy, precision, recall) and endpoint URL.",
         annotations=ToolAnnotations(
             readOnlyHint=True,
@@ -261,14 +261,14 @@ def register(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
-    async def pluto_get_results(args: GetResultsArgs, ctx: Context[Any, Any, Any]) -> Any:
+    async def evals_get_results(args: GetResultsArgs, ctx: Context[Any, Any, Any]) -> Any:
         try:
             return await _get_results(args, ctx)
         except Exception as e:
             return format_tool_error(e)
 
     @mcp.tool(
-        name="pluto_create_api_key",
+        name="evals_create_api_key",
         description="Generate an API key for the evaluator endpoint.",
         annotations=ToolAnnotations(
             readOnlyHint=False,
@@ -277,7 +277,7 @@ def register(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
-    async def pluto_create_api_key(
+    async def evals_create_api_key(
         args: CreateApiKeyArgs, ctx: Context[Any, Any, Any]
     ) -> dict[str, Any]:
         try:
@@ -285,4 +285,4 @@ def register(mcp: FastMCP) -> None:
         except Exception as e:
             return format_tool_error(e)
 
-    _ = (pluto_search_evaluators, pluto_get_results, pluto_create_api_key)
+    _ = (evals_search_evaluators, evals_get_results, evals_create_api_key)

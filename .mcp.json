@@ -1,13 +1,13 @@
 {
     "mcpServers": {
-        "pluto-judge": {
+        "evals": {
             "command": "uv",
             "args": [
                 "run", "--project", "${CLAUDE_PLUGIN_ROOT}",
-                "python", "-m", "pluto_judge"
+                "python", "-m", "evals_mcp"
             ],
             "env": {
-                "PLUTO_API_BASE": "https://pluto.stg.plurai.ai"
+                "EVALS_API_BASE": "https://pluto.stg.plurai.ai"
             }
         }
     }

@@ -1,6 +1,6 @@
 """Typed CopilotKit agent client.
 
-The Pluto agent endpoint at ``/api/agent/api/copilotkit`` accepts a
+The Plurai agent endpoint at ``/api/agent/api/copilotkit`` accepts a
 single envelope shape and replies with a Server-Sent Events stream of
 ``MESSAGES_SNAPSHOT`` / ``STATE_SNAPSHOT`` / etc. events. Tools call
 :meth:`AgentClient.run_agent`, get back a list of typed events, and
@@ -21,9 +21,9 @@ RUN_PATH = "/copilotkit"
 
 
 class AgentClient(BaseHttpClient):
-    """Async client for the Pluto agent (CopilotKit) endpoint."""
+    """Async client for the Plurai agent (CopilotKit) endpoint."""
 
-    _client_label = "Pluto Agent"
+    _client_label = "Plurai Agent"
 
     async def run_agent(
         self,

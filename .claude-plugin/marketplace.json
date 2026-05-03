@@ -1,15 +1,15 @@
 {
-    "name": "pluto-judge",
+    "name": "plurai-plugins-official",
     "owner": {
         "name": "Plurai AI",
         "email": "support@plurai.ai"
     },
     "plugins": [
         {
-            "name": "pluto-judge",
+            "name": "evals",
             "source": "./",
-            "description": "Create fine-tuned LLM-as-a-judge evaluators using the Pluto platform",
-            "version": "0.1.0"
+            "description": "Create fine-tuned LLM-as-a-judge evaluators on the Plurai platform",
+            "version": "0.3.0"
         }
     ]
 }

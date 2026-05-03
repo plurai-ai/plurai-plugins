@@ -1,4 +1,4 @@
-"""Typed HTTP clients for the Pluto REST API and CopilotKit agent endpoint."""
+"""Typed HTTP clients for the Plurai REST API and CopilotKit agent endpoint."""
 
 from .agent import AgentClient
 from .base import (
@@ -21,7 +21,7 @@ from .models import (
     OptimizationView,
     ThreadView,
 )
-from .pluto import PlutoClient
+from .platform import PlatformClient
 
 __all__ = [
     "AgentClient",
@@ -40,6 +40,6 @@ __all__ = [
     "ListClassifiersResponse",
     "MetricsView",
     "OptimizationView",
-    "PlutoClient",
+    "PlatformClient",
     "ThreadView",
 ]

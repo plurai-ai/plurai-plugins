@@ -1,7 +1,7 @@
-"""Typed Pluto REST API client.
+"""Typed Plurai REST API client.
 
 Inherits :class:`BaseHttpClient` for retry, dynamic auth, and SSE
-plumbing; exposes only the endpoints pluto-judge actually calls.
+plumbing; exposes only the endpoints the evals MCP server actually calls.
 """
 
 from __future__ import annotations
@@ -23,10 +23,10 @@ from .models import (
 )
 
 
-class PlutoClient(BaseHttpClient):
-    """Async client for the Pluto REST API."""
+class PlatformClient(BaseHttpClient):
+    """Async client for the Plurai REST API."""
 
-    _client_label = "Pluto API"
+    _client_label = "Plurai API"
 
     # -- Threads ---------------------------------------------------------------
 

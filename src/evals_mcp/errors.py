@@ -15,18 +15,18 @@ from typing import Any, cast
 
 import httpx
 
-_LOGIN_PROMPT = "Run /pluto-judge:login or set PLUTO_API_KEY."
+_LOGIN_PROMPT = "Run /login or set EVALS_API_KEY."
 
 
 class MissingApiKeyError(RuntimeError):
-    """Raised when no Pluto API key is configured.
+    """Raised when no Plurai API key is configured.
 
     Surfaced to tool callers so the model can prompt the user to run
-    ``/pluto-judge:login`` instead of retrying blindly.
+    ``/login`` instead of retrying blindly.
     """
 
     def __init__(self) -> None:
-        super().__init__(f"Pluto API key not set. {_LOGIN_PROMPT}")
+        super().__init__(f"Plurai API key not set. {_LOGIN_PROMPT}")
 
 
 class CorruptCredentialsError(RuntimeError):
@@ -40,8 +40,7 @@ class CorruptCredentialsError(RuntimeError):
     def __init__(self, path: Path, reason: str) -> None:
         self.path = path
         super().__init__(
-            f"Pluto credentials file at {path} is unreadable: {reason}. "
-            "Run /pluto-judge:login to overwrite it."
+            f"Credentials file at {path} is unreadable: {reason}. Run /login to overwrite it."
         )
 
 
@@ -100,10 +99,10 @@ def format_tool_error(exc: BaseException) -> dict[str, str]:
         return {"error": str(exc)}
     if isinstance(exc, httpx.HTTPStatusError):
         if exc.response.status_code == 401:
-            return {"error": f"Pluto API key invalid or expired. {_LOGIN_PROMPT}"}
+            return {"error": f"Plurai API key invalid or expired. {_LOGIN_PROMPT}"}
         return {"error": f"HTTP {exc.response.status_code}: {safe_error_body(exc)}"}
     if isinstance(exc, httpx.TransportError):
-        return {"error": f"Network error reaching Pluto: {exc}"}
+        return {"error": f"Network error reaching Plurai: {exc}"}
     if isinstance(exc, RuntimeError):
-        return {"error": f"Pluto request failed: {exc}"}
+        return {"error": f"Plurai request failed: {exc}"}
     return {"error": f"Unexpected {type(exc).__name__}: {exc}"}

@@ -4,7 +4,7 @@ from .auth import (
     delete_api_key,
     load_api_key,
     main,
-    pluto_headers,
+    platform_headers,
     save_api_key,
 )
 
@@ -14,6 +14,6 @@ __all__ = [
     "delete_api_key",
     "load_api_key",
     "main",
-    "pluto_headers",
+    "platform_headers",
     "save_api_key",
 ]
