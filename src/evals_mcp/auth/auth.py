@@ -1,23 +1,23 @@
-"""User-API-key auth for pluto-judge.
+"""User-API-key auth for the evals MCP server.
 
-The Pluto API and CopilotKit agent endpoints both accept the user's
+The Plurai REST API and CopilotKit agent endpoints both accept the user's
 long-lived API key as ``Authorization: Bearer ak…``. This module:
 
-- resolves the key (env var ``PLUTO_API_KEY`` first, then a JSON file at
-  ``~/.config/pluto/credentials.json`` — overridable via
-  ``PLUTO_CREDENTIALS_PATH``),
-- exposes ``pluto_headers`` / ``agent_headers`` returning the bearer
-  header (raises :class:`~pluto_judge.errors.MissingApiKeyError` when no
-  key is configured, :class:`~pluto_judge.errors.CorruptCredentialsError`
+- resolves the key (env var ``EVALS_API_KEY`` first, then a JSON file at
+  ``~/.config/evals/credentials.json`` — overridable via
+  ``EVALS_CREDENTIALS_PATH``),
+- exposes ``platform_headers`` / ``agent_headers`` returning the bearer
+  header (raises :class:`~evals_mcp.errors.MissingApiKeyError` when no
+  key is configured, :class:`~evals_mcp.errors.CorruptCredentialsError`
   when the file exists but is broken),
 - provides a tiny CLI (``login --key``, ``logout``, ``status``) used by
-  the ``/pluto-judge:login`` slash command.
+  the ``/login`` slash command.
 
 Self-contained — usable standalone for testing:
 
-    python -m pluto_judge auth login --key ak_test_xyz
-    python -m pluto_judge auth status
-    python -m pluto_judge auth logout
+    python -m evals_mcp auth login --key ak_test_xyz
+    python -m evals_mcp auth status
+    python -m evals_mcp auth logout
 """
 
 from __future__ import annotations
@@ -31,13 +31,13 @@ from typing import Any, cast
 
 from ..errors import CorruptCredentialsError, MissingApiKeyError
 
-_ENV_VAR = "PLUTO_API_KEY"
-_DEFAULT_CREDS_PATH = "~/.config/pluto/credentials.json"
+_ENV_VAR = "EVALS_API_KEY"
+_DEFAULT_CREDS_PATH = "~/.config/evals/credentials.json"
 
 
 def _credentials_path() -> Path:
-    """Resolve the credentials file path, honoring ``PLUTO_CREDENTIALS_PATH``."""
-    return Path(os.environ.get("PLUTO_CREDENTIALS_PATH", _DEFAULT_CREDS_PATH)).expanduser()
+    """Resolve the credentials file path, honoring ``EVALS_CREDENTIALS_PATH``."""
+    return Path(os.environ.get("EVALS_CREDENTIALS_PATH", _DEFAULT_CREDS_PATH)).expanduser()
 
 
 def _read_file_key() -> str | None:
@@ -131,10 +131,10 @@ def bearer_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {key}"}
 
 
-# Kept as separate seams for the Pluto API vs the agent endpoint so callers
-# can use the role-appropriate function — they share a key today but may
-# diverge if the agent surface ever requires different scopes/headers.
-def pluto_headers() -> dict[str, str]:
+# Kept as separate seams for the platform REST API vs the agent endpoint so
+# callers can use the role-appropriate function — they share a key today but
+# may diverge if the agent surface ever requires different scopes/headers.
+def platform_headers() -> dict[str, str]:
     return bearer_headers()
 
 
@@ -184,10 +184,10 @@ def _cmd_status() -> int:
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point. argv is the list of args after the `auth` keyword."""
     argv = sys.argv[1:] if argv is None else argv
-    parser = argparse.ArgumentParser(prog="pluto_judge auth")
+    parser = argparse.ArgumentParser(prog="evals-mcp auth")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    login = sub.add_parser("login", help="Save a Pluto API key.")
-    login.add_argument("--key", required=True, help="Pluto API key (e.g. ak_…).")
+    login = sub.add_parser("login", help="Save the Plurai API key.")
+    login.add_argument("--key", required=True, help="API key (e.g. ak_…).")
     sub.add_parser("logout", help="Remove the saved API key.")
     sub.add_parser("status", help="Show whether an API key is configured.")
     args = parser.parse_args(argv)

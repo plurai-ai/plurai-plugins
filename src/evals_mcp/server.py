@@ -1,4 +1,4 @@
-"""FastMCP server instance for pluto-judge."""
+"""FastMCP server instance for the evals MCP server."""
 
 from __future__ import annotations
 
@@ -7,5 +7,5 @@ from mcp.server.fastmcp import FastMCP
 from .state import lifespan
 from .tools import register_all
 
-mcp: FastMCP = FastMCP("pluto-judge", lifespan=lifespan)
+mcp: FastMCP = FastMCP("evals", lifespan=lifespan)
 register_all(mcp)

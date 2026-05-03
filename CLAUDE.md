@@ -1,6 +1,6 @@
-# Pluto-Judge — Claude Code Plugin
+# Evals — Claude Code Plugin
 
-A Claude Code plugin that ships <commands / skills / an MCP server> for creating evaluator agents.
+A Claude Code plugin (`evals` in the `plurai-plugins-official` marketplace) that ships <commands / skills / an MCP server> for creating evaluator agents on the Plurai platform.
 
 ## Repo layout
 - `.claude-plugin/plugin.json` — manifest (bump `version` for releases)

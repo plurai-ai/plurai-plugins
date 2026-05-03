@@ -1,6 +1,6 @@
 """Judge-flow tools: start_judge, send_message, ask_user.
 
-`pluto_send_message` includes a fast-path that short-circuits a duplicate
+`evals_send_message` includes a fast-path that short-circuits a duplicate
 optimize when the classifier has already-completed or in-progress results.
 """
 
@@ -47,9 +47,9 @@ class StartJudgeArgs(BaseModel):
 class SendMessageArgs(BaseModel):
     model_config = _StrictModel
     thread_id: Annotated[
-        str, Field(min_length=1, description="Thread ID returned by pluto_start_judge.")
+        str, Field(min_length=1, description="Thread ID returned by evals_start_judge.")
     ]
-    message: Annotated[str, Field(min_length=1, description="Message to send to the Pluto agent.")]
+    message: Annotated[str, Field(min_length=1, description="Message to send to the Plurai agent.")]
 
 
 class AskUserOption(BaseModel):
@@ -141,7 +141,7 @@ async def _check_optimization_status(state: ServerState, thread_id: str) -> dict
 
     settings = get_settings()
     try:
-        classifier: GetClassifierResponse = await state.pluto.get_classifier(classifier_id)
+        classifier: GetClassifierResponse = await state.platform.get_classifier(classifier_id)
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             return None
@@ -169,7 +169,7 @@ async def _check_optimization_status(state: ServerState, thread_id: str) -> dict
             "status": "optimization_in_progress",
             "message": (
                 "Optimization is already running. Baseline results are available. "
-                "Wait for optimization to complete, then call pluto_get_results."
+                "Wait for optimization to complete, then call evals_get_results."
             ),
             "classifier_id": classifier_id,
             "slug": slug,
@@ -185,7 +185,7 @@ async def _fetch_optimization(
 ) -> OptimizationView | None:
     """Try classifier UUID first, then slug. None from both → no run yet."""
     for identifier in (classifier_id, slug):
-        opt = await state.pluto.get_optimization(identifier, version)
+        opt = await state.platform.get_optimization(identifier, version)
         if opt is not None:
             return opt
     return None
@@ -198,7 +198,7 @@ async def _start_judge(args: StartJudgeArgs, ctx: Context[Any, Any, Any]) -> dic
     state = _state_of(ctx)
     settings = get_settings()
 
-    thread = await state.pluto.create_thread()
+    thread = await state.platform.create_thread()
     state.classifier_by_thread.pop(thread.id, None)
 
     events = await state.agent.run_agent(thread.id, args.task_description)
@@ -215,7 +215,7 @@ async def _start_judge(args: StartJudgeArgs, ctx: Context[Any, Any, Any]) -> dic
         "action_required": "PRESENT_QUESTIONS_TO_USER",
         "instructions": (
             "The agent returned refinement questions. "
-            "Call pluto_ask_user with the questions rephrased as options. "
+            "Call evals_ask_user with the questions rephrased as options. "
             "Do NOT present the questions as text."
         ),
     }
@@ -264,7 +264,7 @@ async def _send_message(args: SendMessageArgs, ctx: Context[Any, Any, Any]) -> d
             "message": (
                 f"Optimization '{message}' triggered for thread {thread_id}. "
                 "It runs in the background (~2 min for LLM, ~20 min for SLM). "
-                "Use pluto_get_results later to check results."
+                "Use evals_get_results later to check results."
             ),
             "thread_id": thread_id,
             "url": f"{settings.api_base.rstrip('/')}/thread/{thread_id}",
@@ -287,9 +287,9 @@ async def _send_message(args: SendMessageArgs, ctx: Context[Any, Any, Any]) -> d
         state.has_questions = True
         result["action_required"] = "PRESENT_QUESTIONS_TO_USER"
         result["instructions"] = (
-            "The agent returned refinement questions. You MUST call pluto_ask_user to present "
+            "The agent returned refinement questions. You MUST call evals_ask_user to present "
             "them. Do NOT answer these questions yourself. Do NOT output any text before "
-            "calling pluto_ask_user.\n\n"
+            "calling evals_ask_user.\n\n"
             "FORMAT RULES:\n"
             "- Labels question: option 1 label = the EXACT label names from brackets joined "
             "with ' / ' plus '(Recommended)'. Option 2 = suggest SPECIFIC alternative label "
@@ -355,7 +355,7 @@ def _fallback_payload(questions: list[AskUserQuestion]) -> dict[str, Any]:
     extra = ""
     if _is_optimization_question(questions):
         extra = (
-            " IMPORTANT: After the user chooses, call pluto_send_message with EXACTLY "
+            " IMPORTANT: After the user chooses, call evals_send_message with EXACTLY "
             "message='Optimize [LLM]' or message='Optimize [SLM]'. One call only. These are "
             "hardcoded strings — do not modify them."
         )
@@ -375,7 +375,7 @@ def _fallback_payload(questions: list[AskUserQuestion]) -> dict[str, Any]:
 async def _ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
     state = _state_of(ctx)
     if not state.has_questions:
-        return {"error": ("You must call pluto_start_judge first. Do NOT ask your own questions.")}
+        return {"error": ("You must call evals_start_judge first. Do NOT ask your own questions.")}
     state.has_questions = False
     questions = args.questions
 
@@ -415,10 +415,10 @@ async def _ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str,
 
 def register(mcp: FastMCP) -> None:
     @mcp.tool(
-        name="pluto_start_judge",
+        name="evals_start_judge",
         description=(
             "Start building an LLM-as-a-judge evaluator: creates a thread, sends the task "
-            "to the Pluto agent, and returns refinement questions. This MUST be your first "
+            "to the Plurai agent, and returns refinement questions. This MUST be your first "
             "tool call."
         ),
         annotations=ToolAnnotations(
@@ -428,7 +428,7 @@ def register(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
-    async def pluto_start_judge(
+    async def evals_start_judge(
         args: StartJudgeArgs, ctx: Context[Any, Any, Any]
     ) -> dict[str, Any]:
         try:
@@ -437,13 +437,13 @@ def register(mcp: FastMCP) -> None:
             return format_tool_error(e)
 
     @mcp.tool(
-        name="pluto_send_message",
+        name="evals_send_message",
         description=(
-            "Send a follow-up message to the Pluto agent. Only use AFTER pluto_start_judge. "
+            "Send a follow-up message to the Plurai agent. Only use AFTER evals_start_judge. "
             "Used for sending user answers and for triggering optimization. "
             "To trigger optimization, send EXACTLY 'Optimize [LLM]' or 'Optimize [SLM]' "
             "(square brackets are literal). Optimization runs in the background — "
-            "call pluto_get_results to retrieve results."
+            "call evals_get_results to retrieve results."
         ),
         annotations=ToolAnnotations(
             readOnlyHint=False,
@@ -452,7 +452,7 @@ def register(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
-    async def pluto_send_message(
+    async def evals_send_message(
         args: SendMessageArgs, ctx: Context[Any, Any, Any]
     ) -> dict[str, Any]:
         try:
@@ -461,7 +461,7 @@ def register(mcp: FastMCP) -> None:
             return format_tool_error(e)
 
     @mcp.tool(
-        name="pluto_ask_user",
+        name="evals_ask_user",
         description=(
             "Present questions to the user via interactive form UI. Use this to ask refinement "
             "questions, optimization choices, or any decision that needs user input. Each "
@@ -474,8 +474,8 @@ def register(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
-    async def pluto_ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
+    async def evals_ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
         return await _ask_user(args, ctx)
 
     # Avoid unused-name warnings under strict linters.
-    _ = (pluto_start_judge, pluto_send_message, pluto_ask_user, Literal)
+    _ = (evals_start_judge, evals_send_message, evals_ask_user, Literal)

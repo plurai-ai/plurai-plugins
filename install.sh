@@ -1,6 +1,6 @@
 #!/bin/bash
-# Pluto Judge — install via uv tool.
-# Requires uv (https://docs.astral.sh/uv/). Installs the pluto-judge
+# Evals MCP — install via uv tool.
+# Requires uv (https://docs.astral.sh/uv/). Installs the evals-mcp
 # console script onto your PATH and reminds you to authenticate.
 
 set -e
@@ -10,10 +10,10 @@ if ! command -v uv >/dev/null 2>&1; then
     exit 1
 fi
 
-REPO_URL="${PLUTO_JUDGE_REPO:-git+https://github.com/plurai-ai/pluto-judge.git}"
+REPO_URL="${EVALS_MCP_REPO:-git+https://github.com/plurai-ai/plurai-plugins-official.git}"
 
 uv tool install --force "$REPO_URL"
 
 echo
 echo "Installed. Now run:"
-echo "  pluto-judge auth login"
+echo "  evals-mcp auth login --key <KEY>"

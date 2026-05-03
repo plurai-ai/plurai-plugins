@@ -1,6 +1,6 @@
-"""Settings singleton for pluto-judge.
+"""Settings singleton for the evals MCP server.
 
-`Settings` is a pydantic-settings model that reads `PLUTO_*` env vars on
+`Settings` is a pydantic-settings model that reads `EVALS_*` env vars on
 construction. Use `get_settings()` for the lazily-initialised, cached
 instance — every caller shares the same object.
 
@@ -20,7 +20,7 @@ from .clients import BaseHttpClientConfig
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix="PLUTO_",
+        env_prefix="EVALS_",
         case_sensitive=False,
         extra="ignore",
     )
@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     api_base: str = "https://pluto.stg.plurai.ai"
     run_base: str | None = None
 
-    # HTTP client knobs (env: PLUTO_HTTP_TIMEOUT, PLUTO_HTTP_MAX_RETRIES, ...).
+    # HTTP client knobs (env: EVALS_HTTP_TIMEOUT, EVALS_HTTP_MAX_RETRIES, ...).
     http_timeout: float = Field(default=30.0, gt=0)
     http_max_retries: int = Field(default=3, ge=0)
     http_backoff_base: float = Field(default=1.0, gt=0)
@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     agent_http_timeout: float = Field(default=300.0, gt=0)
 
     @cached_property
-    def pluto_api(self) -> str:
+    def platform_api(self) -> str:
         return f"{self.api_base}/api/pluto"
 
     @cached_property
@@ -59,9 +59,9 @@ class Settings(BaseSettings):
             return "https://run.stg.plurai.ai"
         return "https://run.plurai.ai"
 
-    def pluto_client_config(self) -> BaseHttpClientConfig:
+    def platform_client_config(self) -> BaseHttpClientConfig:
         return BaseHttpClientConfig(
-            api_url=self.pluto_api,
+            api_url=self.platform_api,
             timeout=self.http_timeout,
             max_retries=self.http_max_retries,
             backoff_base=self.http_backoff_base,

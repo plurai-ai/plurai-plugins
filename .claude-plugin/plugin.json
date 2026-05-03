@@ -1,11 +1,11 @@
 {
-    "name": "pluto-judge",
-    "version": "0.2.0",
-    "description": "Create fine-tuned LLM-as-a-judge evaluators from labeled data using the Pluto platform",
+    "name": "evals",
+    "version": "0.3.0",
+    "description": "Create fine-tuned LLM-as-a-judge evaluators from labeled data on the Plurai platform",
     "author": {
         "name": "Plurai",
         "url": "https://plurai.ai"
     },
-    "homepage": "https://pluto.plurai.ai",
+    "homepage": "https://plurai.ai",
     "keywords": ["evaluation", "llm-as-a-judge", "fine-tuning", "classifier"]
 }

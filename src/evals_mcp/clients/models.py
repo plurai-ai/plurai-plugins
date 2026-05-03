@@ -1,4 +1,4 @@
-"""Pydantic request/response models for the Pluto and Agent clients."""
+"""Pydantic request/response models for the Plurai platform and Agent clients."""
 
 from __future__ import annotations
 
