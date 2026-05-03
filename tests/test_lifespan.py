@@ -20,10 +20,8 @@ from evals_mcp.state import lifespan
 
 @pytest.fixture
 def creds_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    path = tmp_path / "evals" / "credentials.json"
-    monkeypatch.setenv("EVALS_CREDENTIALS_PATH", str(path))
-    monkeypatch.delenv("EVALS_API_KEY", raising=False)
-    return path
+    monkeypatch.setenv("HOME", str(tmp_path))
+    return tmp_path / ".config" / "evals" / "credentials.json"
 
 
 async def test_lifespan_boots_without_a_key(
@@ -39,10 +37,9 @@ async def test_lifespan_boots_without_a_key(
     assert "no API key at startup" in err
 
 
-async def test_lifespan_caches_key_at_startup(
-    creds_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("EVALS_API_KEY", "ak_initial")
+async def test_lifespan_caches_key_at_startup(creds_path: Path) -> None:
+    _ = creds_path
+    auth.save_api_key("ak_initial")
     async with lifespan(None) as state:  # type: ignore[arg-type]
         # Both clients must share the same headers_provider closure so
         # auth_refresh updates them in lockstep.
@@ -51,47 +48,43 @@ async def test_lifespan_caches_key_at_startup(
         assert h1 == h2 == {"Authorization": "Bearer ak_initial"}
 
 
-async def test_headers_provider_resolves_lazily_after_late_login(
-    creds_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_headers_provider_resolves_lazily_after_late_login(creds_path: Path) -> None:
     """User boots without a key, then runs /login mid-session."""
+    _ = creds_path
     async with lifespan(None) as state:  # type: ignore[arg-type]
         # Boot was unauthenticated; provider should still raise.
         with pytest.raises(MissingApiKeyError):
             await state.platform._headers_provider()
 
-        # User now logs in (or sets the env var).
-        monkeypatch.setenv("EVALS_API_KEY", "ak_late")
+        # User now logs in.
+        auth.save_api_key("ak_late")
         headers = await state.platform._headers_provider()
         assert headers == {"Authorization": "Bearer ak_late"}
 
 
-async def test_auth_refresh_picks_up_new_key(
-    creds_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("EVALS_API_KEY", "ak_old")
+async def test_auth_refresh_picks_up_new_key(creds_path: Path) -> None:
+    _ = creds_path
+    auth.save_api_key("ak_old")
     async with lifespan(None) as state:  # type: ignore[arg-type]
         first = await state.platform._headers_provider()
         assert first == {"Authorization": "Bearer ak_old"}
 
-        monkeypatch.setenv("EVALS_API_KEY", "ak_new")
+        auth.save_api_key("ak_new")
         # Without auth_refresh, the cache would still hand back ak_old.
         await state.platform._auth_refresh()  # type: ignore[misc]
         refreshed = await state.platform._headers_provider()
         assert refreshed == {"Authorization": "Bearer ak_new"}
 
 
-async def test_auth_refresh_failure_clears_cache(
-    creds_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_auth_refresh_failure_clears_cache(creds_path: Path) -> None:
     """If refresh fails, subsequent requests must not serve the previously
     cached (now-revoked) headers — they should fail loudly so the model
     prompts re-login instead of silently using a dead key."""
-    monkeypatch.setenv("EVALS_API_KEY", "ak_old")
+    _ = creds_path
+    auth.save_api_key("ak_old")
     async with lifespan(None) as state:  # type: ignore[arg-type]
         await state.platform._headers_provider()  # populate cache
 
-        monkeypatch.delenv("EVALS_API_KEY")
         auth.delete_api_key()
         with pytest.raises(MissingApiKeyError):
             await state.platform._auth_refresh()  # type: ignore[misc]

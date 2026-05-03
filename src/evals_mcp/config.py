@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     api_base: str = "https://pluto.stg.plurai.ai"
     run_base: str | None = None
 
+    # Where the user's API key is persisted by `/login`. Resolved with
+    # ``Path.expanduser()`` at use-site, so ``~`` works.
+    credentials_path: str = "~/.config/evals/credentials.json"
+
     # HTTP client knobs (env: EVALS_HTTP_TIMEOUT, EVALS_HTTP_MAX_RETRIES, ...).
     http_timeout: float = Field(default=30.0, gt=0)
     http_max_retries: int = Field(default=3, ge=0)

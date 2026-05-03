@@ -15,7 +15,9 @@ from typing import Any, cast
 
 import httpx
 
-_LOGIN_PROMPT = "Run /login or set EVALS_API_KEY."
+_LOGIN_PROMPT = (
+    "Ask the user for their Plurai API key and save it with `evals_mcp auth login --key <KEY>`."
+)
 
 
 class MissingApiKeyError(RuntimeError):
@@ -40,7 +42,9 @@ class CorruptCredentialsError(RuntimeError):
     def __init__(self, path: Path, reason: str) -> None:
         self.path = path
         super().__init__(
-            f"Credentials file at {path} is unreadable: {reason}. Run /login to overwrite it."
+            f"Credentials file at {path} is unreadable: {reason}. "
+            "Ask the user for a fresh key and re-run "
+            "`evals_mcp auth login --key <KEY>` to overwrite it."
         )
 
 

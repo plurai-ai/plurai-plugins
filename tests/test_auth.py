@@ -14,11 +14,9 @@ from evals_mcp.errors import CorruptCredentialsError, MissingApiKeyError
 
 @pytest.fixture
 def creds_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect the credentials file into a tmp dir and clear EVALS_API_KEY."""
-    path = tmp_path / "evals" / "credentials.json"
-    monkeypatch.setenv("EVALS_CREDENTIALS_PATH", str(path))
-    monkeypatch.delenv("EVALS_API_KEY", raising=False)
-    return path
+    """Redirect ``~`` into a tmp dir so the credentials file lands there."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    return tmp_path / ".config" / "evals" / "credentials.json"
 
 
 def test_load_api_key_returns_none_when_unset(creds_path: Path) -> None:
@@ -45,24 +43,6 @@ def test_save_sets_dir_to_0700(creds_path: Path) -> None:
     auth.save_api_key("ak_test_xyz")
     mode = stat.S_IMODE(creds_path.parent.stat().st_mode)
     assert mode == 0o700
-
-
-def test_env_var_overrides_file(creds_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    auth.save_api_key("ak_from_file")
-    monkeypatch.setenv("EVALS_API_KEY", "ak_from_env")
-    key, source = auth.load_api_key()
-    assert key == "ak_from_env"
-    assert source == "env"
-
-
-def test_blank_env_var_falls_through_to_file(
-    creds_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    auth.save_api_key("ak_from_file")
-    monkeypatch.setenv("EVALS_API_KEY", "   ")
-    key, source = auth.load_api_key()
-    assert key == "ak_from_file"
-    assert source == "file"
 
 
 def test_save_api_key_rejects_empty(creds_path: Path) -> None:
@@ -98,7 +78,7 @@ def test_delete_api_key(creds_path: Path) -> None:
 def test_platform_headers_raises_when_missing(creds_path: Path) -> None:
     with pytest.raises(MissingApiKeyError) as exc:
         auth.platform_headers()
-    assert "Run /login" in str(exc.value)
+    assert "evals_mcp auth login" in str(exc.value)
 
 
 def test_agent_headers_raises_when_missing(creds_path: Path) -> None:
@@ -118,7 +98,7 @@ def test_load_api_key_raises_on_corrupt_json(creds_path: Path) -> None:
     with pytest.raises(CorruptCredentialsError) as exc:
         auth.load_api_key()
     assert str(creds_path) in str(exc.value)
-    assert "Run /login" in str(exc.value)
+    assert "evals_mcp auth login" in str(exc.value)
 
 
 def test_load_api_key_raises_on_non_string_value(creds_path: Path) -> None:
@@ -151,18 +131,6 @@ def test_load_api_key_treats_empty_string_as_logged_out(creds_path: Path) -> Non
     assert source == "none"
 
 
-def test_corrupt_file_does_not_block_env_var(
-    creds_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Env var is checked before the file, so a broken file shouldn't matter."""
-    creds_path.parent.mkdir(parents=True, exist_ok=True)
-    creds_path.write_text("garbage")
-    monkeypatch.setenv("EVALS_API_KEY", "ak_env")
-    key, source = auth.load_api_key()
-    assert key == "ak_env"
-    assert source == "env"
-
-
 def test_cli_login_logout_status(creds_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert auth.main(["status"]) == 1
     assert "No API key configured." in capsys.readouterr().out
@@ -188,14 +156,6 @@ def test_cli_login_requires_key_flag(creds_path: Path) -> None:
 def test_cli_requires_subcommand(creds_path: Path) -> None:
     with pytest.raises(SystemExit):
         auth.main([])
-
-
-def test_cli_status_reports_env_source(
-    creds_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.setenv("EVALS_API_KEY", "ak_env")
-    assert auth.main(["status"]) == 0
-    assert "source: env" in capsys.readouterr().out
 
 
 def test_cli_status_reports_corrupt_file(

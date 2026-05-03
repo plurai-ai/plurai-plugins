@@ -5,10 +5,7 @@
             "args": [
                 "run", "--project", "${CLAUDE_PLUGIN_ROOT}",
                 "python", "-m", "evals_mcp"
-            ],
-            "env": {
-                "EVALS_API_BASE": "https://pluto.stg.plurai.ai"
-            }
+            ]
         }
     }
 }

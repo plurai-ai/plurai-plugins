@@ -3,9 +3,7 @@
 The Plurai REST API and CopilotKit agent endpoints both accept the user's
 long-lived API key as ``Authorization: Bearer ak…``. This module:
 
-- resolves the key (env var ``EVALS_API_KEY`` first, then a JSON file at
-  ``~/.config/evals/credentials.json`` — overridable via
-  ``EVALS_CREDENTIALS_PATH``),
+- resolves the key from a JSON file at ``~/.config/evals/credentials.json``,
 - exposes ``platform_headers`` / ``agent_headers`` returning the bearer
   header (raises :class:`~evals_mcp.errors.MissingApiKeyError` when no
   key is configured, :class:`~evals_mcp.errors.CorruptCredentialsError`
@@ -29,19 +27,16 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
+from ..config import get_settings
 from ..errors import CorruptCredentialsError, MissingApiKeyError
-
-_ENV_VAR = "EVALS_API_KEY"
-_DEFAULT_CREDS_PATH = "~/.config/evals/credentials.json"
 
 
 def _credentials_path() -> Path:
-    """Resolve the credentials file path, honoring ``EVALS_CREDENTIALS_PATH``."""
-    return Path(os.environ.get("EVALS_CREDENTIALS_PATH", _DEFAULT_CREDS_PATH)).expanduser()
+    return Path(get_settings().credentials_path).expanduser()
 
 
-def _read_file_key() -> str | None:
-    """Return the file-stored API key, or ``None`` if no file is present.
+def load_api_key() -> str | None:
+    """Return the API key from the credentials file, or ``None`` if absent.
 
     Raises :class:`CorruptCredentialsError` when a file exists but cannot be
     decoded — distinguishing "not logged in" from "credentials broken" so
@@ -67,18 +62,6 @@ def _read_file_key() -> str | None:
         raise CorruptCredentialsError(path, "'api_key' is not a string")
     stripped = key.strip()
     return stripped or None
-
-
-def load_api_key() -> str | None:
-    """Resolve the API key. Env var wins over the credentials file.
-
-    Returns the API key or ``None`` if not found. Raises :class:`CorruptCredentialsError` if
-    the file exists but cannot be decoded.
-    """
-    env_key = os.environ.get(_ENV_VAR, "").strip()
-    if env_key:
-        return env_key
-    return _read_file_key()
 
 
 def save_api_key(key: str) -> Path:

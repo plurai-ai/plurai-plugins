@@ -4,6 +4,12 @@ argument-hint: "[task description or --data file.csv]"
 allowed-tools: ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Agent"]
 ---
 
+**Auth.** If any evals MCP tool returns an error containing `Plurai API key not set` or `Plurai API key invalid or expired`, do **not** tell the user to run `/login`. Handle it inline:
+
+1. Ask the user (in chat) to paste their Plurai API key. If they don't have one, point them to https://app.plurai.ai/settings?tab=api-keys → **Create new key**. Warn that the key will appear in this conversation.
+2. Run `uv run --project ${CLAUDE_PLUGIN_ROOT} python -m evals_mcp auth login --key <KEY>` with the pasted key.
+3. On success (`Saved API key to <path>.`), retry the failed tool call and continue with the eval flow. On failure, relay the stderr message to the user.
+
 Call `evals_search_evaluators` first to check if a relevant evaluator already exists. If one matches the user's task, ask (via `evals_ask_user`) if they want to reuse it or create a new one. If reusing, skip to providing the endpoint URL and API key.
 
 If creating new, call `evals_start_judge`.
