@@ -24,9 +24,6 @@ from .errors import CorruptCredentialsError, MissingApiKeyError
 class ServerState:
     platform: PlatformClient
     agent: AgentClient
-    # Latest classifier_id reported by the agent via STATE_SNAPSHOT. One
-    # classifier per session; cleared at start_evaluator.
-    classifier_id: str | None = None
     has_questions: bool = False
     # Mirror of the agent's STATE_SNAPSHOT.commit_id. Non-null means the
     # initial flow (synthetic data generation) is done — the agent has
@@ -98,10 +95,29 @@ async def lifespan(_server: FastMCP) -> AsyncGenerator[ServerState, None]:
             yield state
         finally:
             if state.background_tasks:
-                results = await asyncio.gather(*state.background_tasks, return_exceptions=True)
-                for r in results:
-                    if isinstance(r, BaseException):
-                        print(
-                            f"evals: background task raised on shutdown: {r!r}",
-                            file=sys.stderr,
-                        )
+                # Cancel first, then drain with a bounded wait. Awaiting
+                # without cancelling would block shutdown on the natural
+                # completion of long-lived SSE streams (~20 min for SLM
+                # optimize), which lets the host force-kill us instead.
+                for task in state.background_tasks:
+                    task.cancel()
+                try:
+                    results = await asyncio.wait_for(
+                        asyncio.gather(*state.background_tasks, return_exceptions=True),
+                        timeout=5.0,
+                    )
+                except TimeoutError:
+                    print(
+                        "evals: background tasks did not finish cancelling within 5s; "
+                        "leaving shutdown to proceed.",
+                        file=sys.stderr,
+                    )
+                else:
+                    for r in results:
+                        if isinstance(r, BaseException) and not isinstance(
+                            r, asyncio.CancelledError
+                        ):
+                            print(
+                                f"evals: background task raised on shutdown: {r!r}",
+                                file=sys.stderr,
+                            )

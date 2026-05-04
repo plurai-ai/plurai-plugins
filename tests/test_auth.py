@@ -21,16 +21,12 @@ def creds_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def test_load_api_key_returns_none_when_unset(creds_path: Path) -> None:
     assert not creds_path.exists()
-    key, source = auth.load_api_key()
-    assert key is None
-    assert source == "none"
+    assert auth.load_api_key() is None
 
 
 def test_save_and_load_round_trip(creds_path: Path) -> None:
     auth.save_api_key("ak_test_xyz")
-    key, source = auth.load_api_key()
-    assert key == "ak_test_xyz"
-    assert source == "file"
+    assert auth.load_api_key() == "ak_test_xyz"
 
 
 def test_save_creates_file_with_0600_perms(creds_path: Path) -> None:
@@ -61,8 +57,7 @@ def test_save_is_atomic_via_tmp_rename(creds_path: Path) -> None:
     """A second save replaces the first cleanly with no .tmp leftover."""
     auth.save_api_key("ak_one")
     auth.save_api_key("ak_two")
-    key, _ = auth.load_api_key()
-    assert key == "ak_two"
+    assert auth.load_api_key() == "ak_two"
     leftovers = list(creds_path.parent.glob("*.tmp"))
     assert leftovers == []
 
@@ -118,17 +113,13 @@ def test_load_api_key_raises_on_non_object_root(creds_path: Path) -> None:
 def test_load_api_key_treats_missing_field_as_logged_out(creds_path: Path) -> None:
     creds_path.parent.mkdir(parents=True, exist_ok=True)
     creds_path.write_text(json.dumps({"other_field": "hi"}))
-    key, source = auth.load_api_key()
-    assert key is None
-    assert source == "none"
+    assert auth.load_api_key() is None
 
 
 def test_load_api_key_treats_empty_string_as_logged_out(creds_path: Path) -> None:
     creds_path.parent.mkdir(parents=True, exist_ok=True)
     creds_path.write_text(json.dumps({"api_key": "   "}))
-    key, source = auth.load_api_key()
-    assert key is None
-    assert source == "none"
+    assert auth.load_api_key() is None
 
 
 def test_cli_login_logout_status(creds_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -139,7 +130,7 @@ def test_cli_login_logout_status(creds_path: Path, capsys: pytest.CaptureFixture
     assert "Saved API key" in capsys.readouterr().out
 
     assert auth.main(["status"]) == 0
-    assert "source: file" in capsys.readouterr().out
+    assert "API key configured." in capsys.readouterr().out
 
     assert auth.main(["logout"]) == 0
     assert "Removed" in capsys.readouterr().out

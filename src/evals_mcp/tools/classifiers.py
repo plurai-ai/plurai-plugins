@@ -41,6 +41,17 @@ class SearchEvaluatorsArgs(BaseModel):
 
 class GetResultsArgs(BaseModel):
     model_config = _StrictModel
+    classifier_id: Annotated[
+        str,
+        Field(
+            min_length=1,
+            description=(
+                "Classifier ID from the prior evals_send_message Optimize response. "
+                "The MCP server is stateless across subprocess restarts; the "
+                "orchestrator's conversation context is the durable handoff."
+            ),
+        ),
+    ]
     response_format: Annotated[
         ResponseFormat,
         Field(
@@ -213,22 +224,7 @@ async def _get_results(args: GetResultsArgs, ctx: Context[Any, Any, Any]) -> Any
     state = _state(ctx)
     settings = get_settings()
 
-    # State is the single source of truth for classifier_id — populated by
-    # the optimize agent run's streaming callback. On each Claude Code
-    # wake-up the orchestrator just re-calls this tool; if the background
-    # task hasn't yet emitted the classifier (rare), return classifier_pending
-    # so the orchestrator schedules another wake-up rather than guessing.
-    classifier_id = state.classifier_id
-    if not classifier_id:
-        return {
-            "status": "classifier_pending",
-            "message": (
-                "Classifier ID not yet available. The optimize agent run is "
-                "still starting up. Schedule another wake-up and call "
-                "evals_get_results again."
-            ),
-        }
-
+    classifier_id = args.classifier_id
     classifier: GetClassifierResponse = await state.platform.get_classifier(classifier_id)
     slug = classifier.slug
     version = classifier.default_version.number if classifier.default_version else "1.0.0"
@@ -294,12 +290,10 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool(
         name="evals_get_results",
         description=(
-            "Fetch optimization results (accuracy, precision, recall) and endpoint URL "
-            "for the active classifier in this session. Reads classifier_id from "
-            "session state — no IDs are passed in. Returns status='classifier_pending' "
-            "if the optimize agent run hasn't yet emitted classifier_id, or null "
-            "baseline/optimized while optimization is still running. In both cases, "
-            "schedule another wake-up and call again rather than asking the user."
+            "Fetch optimization results (accuracy, precision, recall) and endpoint URL. "
+            "Pass classifier_id from the prior Optimize response. Returns null "
+            "baseline/optimized while optimization is still running — schedule another "
+            "wake-up and call again rather than asking the user."
         ),
         annotations=ToolAnnotations(
             readOnlyHint=True,

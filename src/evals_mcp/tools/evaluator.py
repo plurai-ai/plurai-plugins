@@ -172,8 +172,10 @@ async def _start_optimize_and_await_classifier(
     it didn't surface within ``timeout``.
     """
     classifier_seen = asyncio.Event()
+    captured_id: str | None = None
 
     def on_event(event: dict[str, Any]) -> None:
+        nonlocal captured_id
         if event.get("type") != "STATE_SNAPSHOT":
             return
         snapshot = event.get("snapshot")
@@ -181,7 +183,7 @@ async def _start_optimize_and_await_classifier(
             return
         cid = cast(dict[str, Any], snapshot).get("classifier_id")
         if isinstance(cid, str) and cid:
-            state.classifier_id = cid
+            captured_id = cid
             classifier_seen.set()
 
     async def run_optimize() -> None:
@@ -214,8 +216,8 @@ async def _start_optimize_and_await_classifier(
             timeout=timeout,
         )
         return None
-    logger.info("Classifier ID surfaced", classifier_id=state.classifier_id)
-    return state.classifier_id
+    logger.info("Classifier ID surfaced", classifier_id=captured_id)
+    return captured_id
 
 
 # ── Optimization fast-path (pre-send check) ──────────────────────────────
@@ -237,6 +239,7 @@ async def _check_optimization_status(
         return {
             "status": "already_optimized",
             "message": "Optimization was already completed. Here are the results.",
+            "classifier_id": classifier_id,
             "slug": slug,
             "version": version,
             "endpoint_url": f"{settings.run_url}/ioa/v1/{slug}/{version}",
@@ -250,6 +253,7 @@ async def _check_optimization_status(
                 "Optimization is already running. Baseline results are available. "
                 "Wait for optimization to complete, then call evals_get_results."
             ),
+            "classifier_id": classifier_id,
             "slug": slug,
             "version": version,
             "endpoint_url": f"{settings.run_url}/ioa/v1/{slug}/{version}",
@@ -297,15 +301,15 @@ async def _handle_optimize(
         state, thread_id, message, _CLASSIFIER_WAIT_TIMEOUT_S
     )
     if classifier_id is None:
-        # Background task is still running and will populate
-        # state.classifier_id when STATE_SNAPSHOT lands. Skill instructs
-        # the orchestrator to schedule a wake-up and call evals_get_results
-        # (which falls back to state.classifier_id) for recovery.
-        return {
-            "status": "optimization_started_pending_id",
-            "thread_id": thread_id,
-            "url": f"{settings.api_base.rstrip('/')}/thread/{thread_id}",
-        }
+        # The optimize SSE stream opened, but no STATE_SNAPSHOT carrying
+        # classifier_id arrived within the wait budget. Without an ID
+        # there's no programmatic recovery — raise so the orchestrator
+        # gets a clean error envelope and can retry from scratch.
+        raise RuntimeError(
+            f"Optimize triggered for thread {thread_id} but no classifier_id "
+            f"emitted within {_CLASSIFIER_WAIT_TIMEOUT_S:.0f}s — "
+            f"check {settings.api_base.rstrip('/')}/thread/{thread_id} and retry."
+        )
 
     classifier: GetClassifierResponse = await state.platform.get_classifier(classifier_id)
     slug = classifier.slug
@@ -321,6 +325,10 @@ async def _handle_optimize(
             f"Optimization '{message}' triggered for thread {thread_id}. "
             "It runs in the background (~2 min for LLM, ~20 min for SLM)."
         ),
+        "classifier_id": classifier_id,
+        "slug": slug,
+        "version": version,
+        "endpoint_url": f"{settings.run_url}/ioa/v1/{slug}/{version}",
         "thread_id": thread_id,
         "url": f"{settings.api_base.rstrip('/')}/thread/{thread_id}",
     }
@@ -334,7 +342,6 @@ async def _start_evaluator(args: StartEvaluatorArgs, ctx: Context[Any, Any, Any]
     settings = get_settings()
 
     thread = await state.platform.create_thread()
-    state.classifier_id = None
 
     events = await state.agent.run_agent(thread.id, args.task_description)
     run = _parse_run(events)
@@ -385,7 +392,6 @@ async def _send_message(args: SendMessageArgs, ctx: Context[Any, Any, Any]) -> d
     }
     if classifier_id:
         result["classifier_id"] = classifier_id
-        state.classifier_id = classifier_id
 
     # Re-arm so the model can call evals_ask_user next, whether the agent
     # came back with another refinement question or just finished the

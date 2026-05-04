@@ -77,15 +77,11 @@ async def _drain_background(state: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_optimize_writes_classifier_to_state_and_returns_endpoint(
-    httpx_mock: Any, ctx: Any
-) -> None:
-    """The streaming STATE_SNAPSHOT writes classifier_id into session
-    state (single source of truth). The response carries slug/version/
-    endpoint_url for display, but no classifier_id — the orchestrator
-    reads it from state on subsequent get_results calls."""
+async def test_optimize_returns_classifier_id_for_round_trip(httpx_mock: Any, ctx: Any) -> None:
+    """The optimize response must echo classifier_id so the orchestrator can
+    pass it back to evals_get_results on each wake-up — that round-trip is
+    the only durable handoff (the MCP server is stateless across restarts)."""
     state = ctx.request_context.lifespan_context
-    assert state.classifier_id is None  # baseline: classifier doesn't exist yet
     httpx_mock.add_response(
         url=AGENT_API,
         method="POST",
@@ -122,20 +118,21 @@ async def test_optimize_writes_classifier_to_state_and_returns_endpoint(
     await _drain_background(state)
 
     assert out["status"] == "optimization_started"
-    assert "classifier_id" not in out  # state is the SoT; not echoed
-    assert state.classifier_id == "cls-abc"
+    assert out["classifier_id"] == "cls-abc"
     assert out["slug"] == "my-eval"
     assert out["version"] == "1.0.0"
     assert "/ioa/v1/my-eval/1.0.0" in out["endpoint_url"]
 
 
 @pytest.mark.asyncio
-async def test_optimize_returns_pending_id_when_classifier_never_emitted(
+async def test_optimize_raises_when_classifier_never_emitted(
     monkeypatch: Any, httpx_mock: Any, ctx: Any
 ) -> None:
     """If the agent never emits a STATE_SNAPSHOT with classifier_id, the
-    poll times out. We must return optimization_started_pending_id (no
-    fabricated ID) so the orchestrator can recover via re-scheduling."""
+    wait times out. Without an ID there's no programmatic recovery (the
+    orchestrator can't poll get_results), so we surface a clean error
+    envelope rather than a fake pending status — the orchestrator retries
+    Optimize from scratch or surfaces the URL to the user."""
     state = ctx.request_context.lifespan_context
 
     # Shrink the wait budget so the timeout path executes near-instantly.
@@ -150,15 +147,14 @@ async def test_optimize_returns_pending_id_when_classifier_never_emitted(
         headers={"content-type": "text/event-stream"},
     )
 
-    out = await _send_message(
-        SendMessageArgs(thread_id="thr-1", message="Optimize [LLM]"),
-        ctx,
-    )
+    # _send_message raises RuntimeError; the registered tool wrapper would
+    # convert that to a {"error": ...} envelope via format_tool_error.
+    with pytest.raises(RuntimeError, match="no classifier_id emitted"):
+        await _send_message(
+            SendMessageArgs(thread_id="thr-1", message="Optimize [LLM]"),
+            ctx,
+        )
     await _drain_background(state)
-
-    assert out["status"] == "optimization_started_pending_id"
-    assert "classifier_id" not in out
-    assert out["thread_id"] == "thr-1"
 
 
 @pytest.mark.asyncio
@@ -188,8 +184,7 @@ async def test_get_results_arms_ask_user_when_optimization_complete(
         status_code=404,
     )
     state.has_questions = False
-    state.classifier_id = "c-1"
-    await _get_results(GetResultsArgs(response_format="json"), ctx)
+    await _get_results(GetResultsArgs(classifier_id="c-1", response_format="json"), ctx)
     assert state.has_questions is False
 
     # Completed case → gate armed.
@@ -207,8 +202,7 @@ async def test_get_results_arms_ask_user_when_optimization_complete(
         },
     )
     state.has_questions = False
-    state.classifier_id = "c-2"
-    await _get_results(GetResultsArgs(response_format="json"), ctx)
+    await _get_results(GetResultsArgs(classifier_id="c-2", response_format="json"), ctx)
     assert state.has_questions is True
 
 
@@ -365,24 +359,21 @@ async def test_get_results_returns_empty_metrics_when_no_optimization(
         method="GET",
         status_code=404,
     )
-    state = ctx.request_context.lifespan_context
-    state.classifier_id = "c-1"
-    out = await _get_results(GetResultsArgs(response_format="json"), ctx)
+    out = await _get_results(GetResultsArgs(classifier_id="c-1", response_format="json"), ctx)
     assert isinstance(out, dict)
     assert out["baseline"] == {"accuracy": None, "precision": None, "recall": None}
     assert out["optimized"] == {"accuracy": None, "precision": None, "recall": None}
 
 
 @pytest.mark.asyncio
-async def test_get_results_returns_pending_when_state_empty(ctx: Any) -> None:
-    """If state.classifier_id is unset (rare: pending_id from a prior
-    Optimize call), get_results signals classifier_pending so the
-    orchestrator schedules another wake-up rather than guessing an ID."""
-    state = ctx.request_context.lifespan_context
-    state.classifier_id = None
-    out = await _get_results(GetResultsArgs(response_format="json"), ctx)
-    assert isinstance(out, dict)
-    assert out["status"] == "classifier_pending"
+async def test_get_results_requires_classifier_id() -> None:
+    """The arg is required — pydantic must reject construction without it
+    so the orchestrator is forced to round-trip the ID via conversation
+    context rather than rely on per-process state."""
+    with pytest.raises(ValueError):
+        GetResultsArgs.model_validate({"response_format": "json"})
+    with pytest.raises(ValueError):
+        GetResultsArgs.model_validate({"classifier_id": "", "response_format": "json"})
 
 
 # ── start_evaluator happy path ───────────────────────────────────────────
