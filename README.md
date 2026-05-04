@@ -1,4 +1,4 @@
-# Evals — Claude Code MCP Server
+# Evals — Claude Code Plugin
 
 Create fine-tuned LLM-as-a-judge evaluators on the [Plurai platform](https://plurai.ai), directly from Claude Code. Describe what you want to evaluate, answer a few refinement questions, and the plugin returns a deployed HTTPS endpoint you can call from your application.
 
