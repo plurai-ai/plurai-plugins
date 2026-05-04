@@ -1,0 +1,11 @@
+{
+    "mcpServers": {
+        "evals": {
+            "command": "uv",
+            "args": [
+                "run", "--project", "${CLAUDE_PLUGIN_ROOT}",
+                "python", "-m", "evals_mcp"
+            ]
+        }
+    }
+}

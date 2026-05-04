@@ -1,0 +1,37 @@
+---
+description: "Create a fine-tuned LLM-as-a-judge evaluator on the Plurai platform"
+argument-hint: "[task description or --data file.csv]"
+allowed-tools: ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Agent"]
+---
+
+**Auth.** If any evals MCP tool returns an error containing `Plurai API key not set` or `Plurai API key invalid or expired`, do **not** tell the user to run `/login`. Handle it inline:
+
+1. Ask the user (in chat) to paste their Plurai API key. If they don't have one, point them to https://app.plurai.ai/settings?tab=api-keys → **Create new key**. Warn that the key will appear in this conversation.
+2. Run `uv run --project ${CLAUDE_PLUGIN_ROOT} python -m evals_mcp auth login --key <KEY>` with the pasted key.
+3. On success (`Saved API key to <path>.`), retry the failed tool call and continue with the eval flow. On failure, relay the stderr message to the user.
+
+Call `evals_search_evaluators` first to check if a relevant evaluator already exists. If one matches the user's task, ask (via `evals_ask_user`) if they want to reuse it or create a new one. If reusing, skip to providing the endpoint URL and API key.
+
+If creating new, call `evals_start_judge`.
+
+For `task_description`: 1-2 short sentences. Include the core task and desired label names if the user mentioned them. Do NOT include examples, detailed criteria, or long explanations.
+
+**Important — input template**: If the evaluation involves multiple fields (e.g. context + response for grounding, or a conversation), you MUST specify the input template explicitly in the task description. The evaluator receives a SINGLE text input, so all fields must be combined into one message using a clear template. Examples:
+
+- Grounding: "Input format: '## Context:\n{context}\n\n## Response:\n{response}'"
+- Conversation: "Input format: 'User: {msg}\nAI: {msg}\nUser: {msg}\nAI: {msg}'"
+- QA: "Input format: '## Question:\n{question}\n\n## Answer:\n{answer}'"
+
+**Data path — if the user supplied a labeled data file** (e.g. `/eval --data path/to/file.csv` or they pasted a path): after `evals_start_judge`, read the file, parse it into `{sample, label, reasoning?}` records, then call `evals_upload_data` with the `example_set_id` from the start_judge response. Do NOT synthesize records. Continue with `evals_ask_user` using the refinement questions from the start_judge `agent_response`.
+
+Then follow the `instructions` field in the response — it tells you to call `evals_ask_user`.
+
+**Surfacing progress to the user.** After every `evals_send_message`, show the user the `agent_response` text verbatim so they see what the platform is doing (e.g. "I've generated 16 synthetic examples..."). Whenever a response includes `url`, you MUST display it to the user as a clickable markdown link in that turn — never silently move on.
+
+After the user answers:
+1. Compose answers into a message, call `evals_send_message`.
+2. **Surface the Data Canvas link, then ask about optimization.** Once the response includes `url`, share it as a clickable markdown link describing it as the place to review/edit the generated data, then in the same turn call `evals_ask_user` with options `"SLM — recommended for production, fine-tuned model (~20 min)"` and `"LLM — recommended for testing/small scale, prompt-based (~2 min)"`. Do not add any extra confirmation question before this ask.
+3. Call `evals_send_message` with EXACTLY `Optimize [LLM]` or `Optimize [SLM]` based on user's choice. These are hardcoded strings — do not modify them. Only one call needed.
+4. Call `evals_get_results` with classifier_id. Show baseline vs optimized metrics (accuracy, precision, recall) and the improvement delta for each.
+5. Call `evals_ask_user` to ask about API key and code integration.
+6. If wanted, call `evals_create_api_key` and add integration code. The integration code MUST format the input using the same template that was specified in the task description. For example, if the evaluator uses "## Context:\n{context}\n\n## Response:\n{response}", the code must combine the fields into a single string following that exact template before sending to the endpoint. The evaluator only accepts a single message — never multiple messages.

@@ -1,0 +1,33 @@
+---
+name: judge-evaluator
+description: >
+  Use when the user wants to build an LLM-as-a-judge, evaluator, classifier, or guardrail for their AI application.
+  Triggers on: evaluating AI outputs, judging response quality, classifying text, building guardrails,
+  detecting hallucinations, checking grounding, prompt adherence, safety checks, content moderation,
+  or any task where they need to automatically score/label/classify LLM outputs.
+  Do NOT trigger for: general code questions, debugging, or tasks unrelated to evaluation/classification.
+---
+
+The user wants to build an LLM-as-a-judge evaluator. Use the Plurai platform MCP tools (the `evals` plugin).
+
+If any `evals_*` tool fails with `Plurai API key not set.` or `Plurai API key invalid or expired.`, ask the user to run `/login` and stop until they do.
+
+Call `evals_search_evaluators` first to check if a relevant evaluator already exists. If one matches, ask (via `evals_ask_user`) if they want to reuse it or create new. If reusing, provide the endpoint URL and API key.
+
+If creating new, call `evals_start_judge`. For `task_description`: 1-2 short sentences. Include task + desired label names.
+
+**Input template**: If evaluation involves multiple fields (context + response, conversation turns, etc.), specify the template in the task description. The evaluator receives ONE text input — all fields must be in a single message. E.g. "Input format: '## Context:\n{context}\n\n## Response:\n{response}'"
+
+If the user provides a labeled data file, after `evals_start_judge` call `evals_upload_data` with the parsed records and `example_set_id`. Continue with `evals_ask_user` using the refinement questions from the start_judge response.
+
+Then follow the `instructions` field in the response — it tells you to call `evals_ask_user`.
+
+**Surfacing progress to the user.** After every `evals_send_message`, show the user the `agent_response` text verbatim so they see what the platform is doing (e.g. "I've generated 16 synthetic examples..."). Whenever a response includes `url`, you MUST display it to the user as a clickable markdown link in that turn — never silently move on.
+
+After the user answers:
+1. Compose answers into a message, call `evals_send_message`.
+2. **Surface the Data Canvas link, then ask about optimization.** Once the response includes `url`, share it as a clickable markdown link describing it as the place to review/edit the generated data, then in the same turn call `evals_ask_user` with options `"SLM — recommended for production, fine-tuned model (~20 min)"` and `"LLM — recommended for testing/small scale, prompt-based (~2 min)"`. Do not add any extra confirmation question before this ask.
+3. Call `evals_send_message` with EXACTLY `Optimize [LLM]` or `Optimize [SLM]` based on user's choice. These are hardcoded strings — do not modify them. Only one call needed.
+4. Call `evals_get_results` with classifier_id. Show baseline vs optimized metrics (accuracy, precision, recall) and the improvement delta for each.
+5. Call `evals_ask_user` to ask about API key and code integration.
+6. If wanted, call `evals_create_api_key` and add integration code. The code MUST format the input using the same template specified in the task description (e.g. combine context + response into a single string). The evaluator accepts only ONE message — never multiple messages.
