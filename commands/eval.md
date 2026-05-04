@@ -10,7 +10,7 @@ allowed-tools: ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Agent"]
 2. Run `uv run --project ${CLAUDE_PLUGIN_ROOT} python -m evals_mcp auth login --key <KEY>` with the pasted key.
 3. On success (`Saved API key to <path>.`), retry the failed tool call and continue with the eval flow. On failure, relay the stderr message to the user.
 
-Call `evals_search_evaluators` first to check if a relevant evaluator already exists. If one matches the user's task, ask (via `evals_ask_user`) if they want to reuse it or create a new one. If reusing, skip to providing the endpoint URL and API key.
+Call `evals_search_evaluators` first as an optimization to check whether the user already has an evaluator in their Plurai workspace that fits this task. **If the list is empty, say nothing about it and proceed silently to create a new one** — a fresh user has no evaluators yet and should not be told something is missing. If one or more existing evaluators match, surface the full list to the user and use `evals_ask_user` to ask whether to reuse one or create a new one. If reusing, skip to providing the endpoint URL and API key.
 
 If creating new, call `evals_start_judge`.
 

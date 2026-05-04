@@ -36,9 +36,9 @@ class StartJudgeArgs(BaseModel):
         str,
         Field(
             min_length=1,
-            max_length=150,
+            max_length=1024,
             description=(
-                "1-2 sentences, max 150 chars. Include task + desired label names. "
+                "Several sentences, max 1024 chars. Include task + desired label names. "
                 "No examples or criteria. "
                 "Example: 'Classify responses as health_advice or safe.'"
             ),
@@ -419,13 +419,14 @@ async def _send_message(args: SendMessageArgs, ctx: Context[Any, Any, Any]) -> d
 # ── ask_user (elicitation) ───────────────────────────────────────────────
 async def _ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
     state = _state_of(ctx)
-    # Single gate: only allow ask_user right after start_judge or a
-    # send_message that re-armed has_questions. Stops the model from
-    # injecting its own questions before the flow has begun.
+    # Single gate: only allow ask_user right after a tool that armed
+    # has_questions — start_judge, a send_message that re-armed it, or a
+    # search_evaluators that returned matches. Stops the model from injecting
+    # its own questions before any flow has begun.
     if not state.has_questions:
         return {
             "error": (
-                "You must call evals_start_judge first. "
+                "You must call evals_start_judge or evals_search_evaluators first. "
                 "Do NOT ask your own questions before the flow has begun."
             )
         }

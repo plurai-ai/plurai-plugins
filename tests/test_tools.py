@@ -104,6 +104,65 @@ async def test_search_evaluators_paginates_and_renders_markdown(httpx_mock: Any,
     )
     assert isinstance(md, str)
     assert "eval-0" in md and "eval-1" in md and "eval-2" not in md
+    # Header must scope the result to the user's own workspace, not a shared library.
+    assert "in your Plurai workspace" in md
+
+
+@pytest.mark.asyncio
+async def test_search_evaluators_empty_state_frames_as_personal_collection(
+    httpx_mock: Any, ctx: Any
+) -> None:
+    """An empty workspace must not read like a plugin failure — it should
+    tell the model to proceed silently to creation."""
+    httpx_mock.add_response(url=f"{PLATFORM_API}/classifiers", method="GET", json={"items": []})
+    md = await _search_evaluators(
+        SearchEvaluatorsArgs(limit=25, offset=0, response_format="markdown"), ctx
+    )
+    assert isinstance(md, str)
+    assert "no existing evaluators" in md
+    assert "normal for a new account" in md
+    assert "proceed" in md.lower()
+    # Empty result must NOT arm the ask_user gate — the model would otherwise
+    # be free to invent its own pre-flow questions.
+    assert ctx.request_context.lifespan_context.has_questions is False
+
+
+@pytest.mark.asyncio
+async def test_search_evaluators_arms_ask_user_gate_when_matches_exist(
+    httpx_mock: Any, ctx: Any
+) -> None:
+    """When matching evaluators are returned, the model needs to call
+    evals_ask_user to ask reuse-vs-create-new. Search must arm has_questions
+    so that ask_user passes its gate."""
+    items = [
+        {
+            "id": "id-0",
+            "name": "eval-0",
+            "description": "",
+            "slug": "slug-0",
+            "defaultVersion": {"number": "1.0.0"},
+            "outputSchema": {"properties": {"label": {"enum": ["a"]}}},
+            "createdAt": "2026-01-01",
+        }
+    ]
+    httpx_mock.add_response(url=f"{PLATFORM_API}/classifiers", method="GET", json={"items": items})
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/id-0/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/slug-0/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+
+    state = ctx.request_context.lifespan_context
+    state.has_questions = False
+    await _search_evaluators(
+        SearchEvaluatorsArgs(limit=25, offset=0, response_format="markdown"), ctx
+    )
+    assert state.has_questions is True
 
 
 @pytest.mark.asyncio

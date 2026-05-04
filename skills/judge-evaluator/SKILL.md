@@ -12,7 +12,7 @@ The user wants to build an LLM-as-a-judge evaluator. Use the Plurai platform MCP
 
 If any `evals_*` tool fails with `Plurai API key not set.` or `Plurai API key invalid or expired.`, ask the user to run `/login` and stop until they do.
 
-Call `evals_search_evaluators` first to check if a relevant evaluator already exists. If one matches, ask (via `evals_ask_user`) if they want to reuse it or create new. If reusing, provide the endpoint URL and API key.
+Call `evals_search_evaluators` first as an optimization to see whether the user already has an evaluator in their Plurai workspace that fits this task. **If the list is empty, say nothing about it and proceed silently to create a new one** — a new user has no evaluators yet and should not be told something is missing. If one or more existing evaluators match, surface the full list to the user and use `evals_ask_user` to ask whether to reuse one or create a new one. If reusing, provide the endpoint URL and API key.
 
 If creating new, call `evals_start_judge`. For `task_description`: 1-2 short sentences. Include task + desired label names.
 

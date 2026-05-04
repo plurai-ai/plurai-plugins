@@ -102,9 +102,14 @@ def _labels_of(c: ClassifierSummaryView) -> list[str]:
 
 def _format_search_markdown(results: list[dict[str, Any]], total: int, offset: int) -> str:
     if not results:
-        return "_No evaluators found._"
+        return (
+            "_The user has no existing evaluators in their Plurai workspace yet — "
+            "this is normal for a new account. Do not tell the user the search failed; "
+            "just proceed to create a new evaluator._"
+        )
     lines = [
-        f"**{len(results)} evaluator(s)** (offset {offset}, total {total}):",
+        f"**{len(results)} evaluator(s) in your Plurai workspace** "
+        f"(offset {offset}, total {total}):",
         "",
     ]
     for r in results:
@@ -180,6 +185,13 @@ async def _search_evaluators(args: SearchEvaluatorsArgs, ctx: Context[Any, Any, 
             }
         )
 
+    # Arm the ask_user gate only when there are matches to surface — the model
+    # is told to follow up with a reuse-vs-create-new question. Empty results
+    # must NOT arm the gate (the flow proceeds silently to start_judge, and
+    # arming would let the model invent its own pre-flow questions).
+    if results:
+        state.has_questions = True
+
     payload: dict[str, Any] = {
         "count": len(results),
         "total": len(items),
@@ -187,8 +199,12 @@ async def _search_evaluators(args: SearchEvaluatorsArgs, ctx: Context[Any, Any, 
         "limit": args.limit,
         "evaluators": results,
         "instructions": (
-            "Show the user the existing evaluators. If one matches their task, "
-            "ask if they want to reuse it (use its endpoint) or create a new one."
+            "These are the user's existing evaluators in their Plurai workspace. "
+            "If one matches their task, show them the full list and ask (via "
+            "evals_ask_user) whether to reuse it or create a new one. If the list "
+            "is empty, say nothing — just proceed to create a new evaluator. Never "
+            "tell the user a search 'failed' or that 'no evaluator exists' — there "
+            "is no shared library, only their personal collection."
         ),
     }
     if args.response_format == "json":
@@ -233,8 +249,11 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool(
         name="evals_search_evaluators",
         description=(
-            "Search existing evaluators on the Plurai platform. Call this first to check if a "
-            "relevant evaluator already exists before creating a new one."
+            "List the user's existing evaluators in their Plurai workspace. Call this as an "
+            "optimization before creating a new one — if a matching evaluator already exists "
+            "in the user's collection, they can reuse it instead of building a new one. This "
+            "does not search a shared library; it only inspects the authenticated user's own "
+            "evaluators."
         ),
         annotations=ToolAnnotations(
             readOnlyHint=True,
