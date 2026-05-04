@@ -64,18 +64,8 @@ class FakeRequestContext:
 class FakeContext:
     """Minimal stand-in for FastMCP's Context — just enough surface for our tools."""
 
-    def __init__(self, state: ServerState, *, elicit_action: str = "decline") -> None:
+    def __init__(self, state: ServerState) -> None:
         self.request_context = FakeRequestContext(state)
-        self._elicit_action = elicit_action
-
-    async def elicit(self, *, message: str, schema: type) -> Any:
-        # Default: decline, exercising the AskUserQuestion fallback path.
-        class _Result:
-            def __init__(self, action: str) -> None:
-                self.action = action
-                self.data = None
-
-        return _Result(self._elicit_action)
 
 
 @pytest.fixture

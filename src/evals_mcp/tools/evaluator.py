@@ -12,11 +12,9 @@ from typing import Annotated, Any, Literal, TypedDict, cast
 
 import httpx
 import structlog
-from mcp.server.elicitation import AcceptedElicitation
 from mcp.server.fastmcp import Context, FastMCP
-from mcp.shared.exceptions import McpError
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field, create_model
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..clients import AgentEvent, GetClassifierResponse, OptimizationView
 from ..config import Settings, get_settings
@@ -328,77 +326,6 @@ async def _handle_optimize(
     }
 
 
-def _fallback_payload(questions: list[AskUserQuestion], state: ServerState) -> dict[str, Any]:
-    """When elicitation is declined / unsupported, return a payload the model
-    can forward to the host's AskUserQuestion tool.
-
-    The optimization-step reminder is attached only after the initial flow
-    is done (signalled by ``state.commit_id`` being set) — pre-commit the
-    model is forwarding agent refinement questions and the reminder doesn't
-    apply.
-    """
-    ask_user_questions = [
-        {
-            "question": q.question,
-            "header": q.question[:12],
-            "options": [{"label": o.label, "description": o.value} for o in q.options],
-            "multiSelect": False,
-        }
-        for q in questions
-    ]
-    extra = ""
-    if state.commit_id is not None:
-        # In the post-flow-done phase the model drives questions; the
-        # most consequential one is SLM-vs-LLM where the follow-up
-        # send_message must use EXACT formatting. Attach with conditional
-        # framing so it's a no-op for the integration-code question.
-        extra = (
-            " IF this is the model-choice question (SLM vs LLM), then after the user "
-            "chooses, call evals_send_message with EXACTLY message='Optimize [LLM]' or "
-            "message='Optimize [SLM]'. One call only. These are hardcoded strings — do not "
-            "modify them."
-        )
-    return {
-        "action": "elicitation_unavailable",
-        "fallback": "AskUserQuestion",
-        "instructions": (
-            "Elicitation is not available in this environment. "
-            "You MUST now call the AskUserQuestion tool with the questions below. "
-            "Use ToolSearch to load it first if needed. Do NOT answer the questions yourself."
-            + extra
-        ),
-        "askUserQuestions": ask_user_questions,
-    }
-
-
-def _build_elicit_form(questions: list[AskUserQuestion]) -> type[BaseModel]:
-    """Dynamically build a Pydantic form model from user-supplied questions.
-
-    Each question becomes one `string` field; options are encoded as a JSON
-    schema `enum` so the elicitation UI renders a picker.
-    """
-    fields: dict[str, Any] = {}
-    for i, q in enumerate(questions):
-        field_name = f"q{i + 1}"
-        if q.options:
-            allowed: list[Any] = [o.value for o in q.options]
-            fields[field_name] = (
-                str,
-                Field(
-                    ...,
-                    title=q.question,
-                    json_schema_extra={"enum": allowed},
-                ),
-            )
-        else:
-            fields[field_name] = (str, Field(..., title=q.question))
-    return create_model(  # pyright: ignore[reportCallIssue, reportUnknownVariableType]
-        "AskUserForm",
-        __config__=_StrictModel,
-        **fields,
-    )
-
-
 # ── Tool implementations ─────────────────────────────────────────────────
 
 
@@ -470,8 +397,12 @@ async def _send_message(args: SendMessageArgs, ctx: Context[Any, Any, Any]) -> d
         result["instructions"] = (
             "The synthetic examples are ready. You MUST do all three in this turn: "
             "(1) show the user the agent_response text verbatim; "
-            "(2) share the url as a clickable markdown link, describing it as the "
-            "place to review/edit the generated data on the Plurai platform; "
+            "(2) share the url as a clickable markdown link whose link text is "
+            "exactly 'UI experience' — do NOT substitute any other label such "
+            "as 'Data Canvas', the evaluator name, or the thread title. After "
+            "the link, tell the user they can review/edit the generated data "
+            "and also track progress or generate more evals in the UI "
+            "experience; "
             "(3) call evals_ask_user with the model-choice question. Use header "
             '"Model Choice" and question "Which model would you like to generate?". '
             "Options: "
@@ -488,8 +419,13 @@ async def _send_message(args: SendMessageArgs, ctx: Context[Any, Any, Any]) -> d
     return result
 
 
-# ── ask_user (elicitation) ───────────────────────────────────────────────
+# ── ask_user ─────────────────────────────────────────────────────────────
 async def _ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
+    """Returns a payload that instructs the model to call the host's
+    ``AskUserQuestion`` tool. We don't use MCP elicitation: it can't render
+    per-option descriptions or headers, so it would show a strictly poorer
+    prompt than ``AskUserQuestion`` provides.
+    """
     state = _state_of(ctx)
     # Single gate: only allow ask_user right after a tool that armed
     # has_questions — start_evaluator, a send_message that re-armed it, or a
@@ -503,30 +439,36 @@ async def _ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str,
             )
         }
     state.has_questions = False
-    questions = args.questions
 
-    form_model = _build_elicit_form(questions)
-    try:
-        result = await ctx.elicit(message="Please answer these questions:", schema=form_model)
-    except McpError:
-        # Host doesn't implement elicitation. Fall back.
-        return _fallback_payload(questions, state)
-    except Exception:
-        # Unknown failure (transport, schema bug, internal). Log so we can
-        # debug in environments that should support elicitation, and still
-        # fall back so the user isn't stuck.
-        logger.exception(
-            "Elicitation failed unexpectedly; falling back",
-            question_count=len(questions),
+    extra = ""
+    if state.commit_id is not None:
+        # Post-initial-flow, the most consequential question is SLM-vs-LLM,
+        # where the follow-up send_message must use EXACT formatting. The
+        # conditional framing makes this a no-op for other questions (e.g.
+        # the integration-language picker).
+        extra = (
+            " IF this is the model-choice question (SLM vs LLM), then after the user "
+            "chooses, call evals_send_message with EXACTLY message='Optimize [LLM]' or "
+            "message='Optimize [SLM]'. One call only. These are hardcoded strings — do not "
+            "modify them."
         )
-        return _fallback_payload(questions, state)
-    # Decline / cancel both fall through to the AskUserQuestion fallback so
-    # the user isn't stranded — same shape as elicit-unavailable.
-    if not isinstance(result, AcceptedElicitation):
-        return _fallback_payload(questions, state)
-    data_dict = result.data.model_dump()
-    answers = {q.question: data_dict.get(f"q{i + 1}", "") for i, q in enumerate(questions)}
-    return {"answers": answers, "action": "accepted"}
+    return {
+        "action": "ask_user_question",
+        "instructions": (
+            "Call the AskUserQuestion tool with the questions below. "
+            "Use ToolSearch to load it first if needed. Do NOT answer the questions yourself."
+            + extra
+        ),
+        "askUserQuestions": [
+            {
+                "question": q.question,
+                "header": q.question[:12],
+                "options": [{"label": o.label, "description": o.value} for o in q.options],
+                "multiSelect": False,
+            }
+            for q in args.questions
+        ],
+    }
 
 
 # ── Registration ─────────────────────────────────────────────────────────

@@ -443,7 +443,9 @@ async def test_ask_user_requires_start_evaluator_first(ctx: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_ask_user_falls_back_when_elicit_declined(ctx: Any) -> None:
+async def test_ask_user_returns_ask_user_question_payload(ctx: Any) -> None:
+    """ask_user always returns a payload that instructs the model to call
+    the host's AskUserQuestion tool — we don't use MCP elicitation at all."""
     ctx.request_context.lifespan_context.has_questions = True
     out = await _ask_user(
         AskUserArgs(
@@ -459,9 +461,10 @@ async def test_ask_user_falls_back_when_elicit_declined(ctx: Any) -> None:
         ),
         ctx,
     )
-    assert out["action"] == "elicitation_unavailable"
-    assert out["fallback"] == "AskUserQuestion"
-    # has_questions should be reset whether we accepted or fell back.
+    assert out["action"] == "ask_user_question"
+    assert "AskUserQuestion" in out["instructions"]
+    assert len(out["askUserQuestions"]) == 1
+    assert {o["label"] for o in out["askUserQuestions"][0]["options"]} == {"LLM", "SLM"}
     assert ctx.request_context.lifespan_context.has_questions is False
 
 
@@ -471,8 +474,8 @@ async def test_ask_user_falls_back_when_elicit_declined(ctx: Any) -> None:
 @pytest.mark.asyncio
 async def test_ask_user_allowed_for_slm_llm_step(ctx: Any) -> None:
     """The SLM/LLM step reaches ask_user the same way refinement does:
-    the prior send_message re-armed has_questions. ``commit_id`` only
-    affects the fallback hint, not the gate."""
+    the prior send_message re-armed has_questions. ``commit_id`` adds the
+    Optimize-[LLM]/Optimize-[SLM] follow-up hint to instructions."""
     state = ctx.request_context.lifespan_context
     state.has_questions = True
     state.commit_id = "commit-xyz"
@@ -491,9 +494,10 @@ async def test_ask_user_allowed_for_slm_llm_step(ctx: Any) -> None:
         ),
         ctx,
     )
-    # Should NOT be a gating error — falls back to AskUserQuestion (decline).
     assert "error" not in out
-    assert out["action"] == "elicitation_unavailable"
+    assert out["action"] == "ask_user_question"
+    assert "Optimize [LLM]" in out["instructions"]
+    assert "Optimize [SLM]" in out["instructions"]
 
 
 # ── send_message: surfaces url + instruction when initial flow completes ─
