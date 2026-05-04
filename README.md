@@ -24,6 +24,10 @@ In any Claude Code session:
 /reload-plugins
 ```
 
+## API key
+
+After creating your free Plurai account, go to https://app.plurai.ai/settings?tab=api-keys , create an API key and paste it in the console. Your API key is stored locally on your machine and used only to run your requests. It is not sent to our servers.
+
 ## Use it
 
 ```

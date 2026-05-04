@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     # ``Path.expanduser()`` at use-site, so ``~`` works.
     credentials_path: str = "~/.config/evals/credentials.json"
 
+    # Where structured server logs are written. Claude Code discards stderr
+    # from stdio MCP servers, so file logging is the only tail-able sink.
+    log_path: str = "~/.cache/evals-mcp/server.log"
+    log_level: str = "INFO"
+
     # HTTP client knobs (env: EVALS_HTTP_TIMEOUT, EVALS_HTTP_MAX_RETRIES, ...).
     http_timeout: float = Field(default=30.0, gt=0)
     http_max_retries: int = Field(default=3, ge=0)

@@ -253,17 +253,25 @@ class BaseHttpClient:
         json_body: Mapping[str, Any],
         *,
         timeout: float | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[dict[str, Any]]:
         """POST + parse a Server-Sent Events response into decoded events.
 
         Tenacity retry is intentionally skipped — long-lived streams should
         not be retried mid-flight. The 401-refresh-once hook still applies.
         ``timeout=None`` falls back to the configured client timeout.
+
+        ``on_event`` is invoked synchronously for each successfully decoded
+        event before it's appended to the returned list — used by callers
+        that need to react to events mid-stream (e.g. extract a classifier
+        id while a long-lived agent run is still emitting).
         """
         effective_timeout = timeout if timeout is not None else self._config.timeout
         headers = dict(await self._headers_provider())
         try:
-            return await self._sse_send(path, headers, json_body, effective_timeout)
+            return await self._sse_send(
+                path, headers, json_body, effective_timeout, on_event=on_event
+            )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 401 or self._auth_refresh is None:
                 raise
@@ -274,7 +282,9 @@ class BaseHttpClient:
                     f"Auth refresh failed during SSE POST {path}: {refresh_exc}"
                 ) from refresh_exc
             headers = dict(await self._headers_provider())
-            return await self._sse_send(path, headers, json_body, effective_timeout)
+            return await self._sse_send(
+                path, headers, json_body, effective_timeout, on_event=on_event
+            )
 
     async def _sse_send(
         self,
@@ -282,6 +292,8 @@ class BaseHttpClient:
         headers: dict[str, str],
         json_body: Mapping[str, Any],
         timeout: float,
+        *,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
         async with aconnect_sse(
@@ -297,7 +309,7 @@ class BaseHttpClient:
                 if not sse.data:
                     continue
                 try:
-                    events.append(json.loads(sse.data))
+                    parsed = json.loads(sse.data)
                 except json.JSONDecodeError as exc:
                     # Don't kill the stream on a single corrupt event;
                     # log so silent truncation is debuggable.
@@ -308,4 +320,14 @@ class BaseHttpClient:
                         sample=sse.data[:200],
                     )
                     continue
+                if on_event is not None:
+                    try:
+                        on_event(parsed)
+                    except Exception:
+                        # A buggy callback must not break the stream.
+                        logger.exception(
+                            f"on_event callback raised in {self._client_label}",
+                            path=path,
+                        )
+                events.append(parsed)
         return events

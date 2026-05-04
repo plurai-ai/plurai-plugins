@@ -25,7 +25,7 @@ class ServerState:
     platform: PlatformClient
     agent: AgentClient
     # Latest classifier_id reported by the agent via STATE_SNAPSHOT. One
-    # classifier per session; cleared at start_judge.
+    # classifier per session; cleared at start_evaluator.
     classifier_id: str | None = None
     has_questions: bool = False
     # Mirror of the agent's STATE_SNAPSHOT.commit_id. Non-null means the

@@ -1,4 +1,4 @@
-"""Judge-flow tools: start_judge, send_message, ask_user.
+"""Evaluator-flow tools: start_evaluator, send_message, ask_user.
 
 `evals_send_message` includes a fast-path that short-circuits a duplicate
 optimize when the classifier has already-completed or in-progress results.
@@ -30,7 +30,7 @@ logger: Any = structlog.get_logger(__name__)
 _StrictModel = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
-class StartJudgeArgs(BaseModel):
+class StartEvaluatorArgs(BaseModel):
     model_config = _StrictModel
     task_description: Annotated[
         str,
@@ -49,7 +49,7 @@ class StartJudgeArgs(BaseModel):
 class SendMessageArgs(BaseModel):
     model_config = _StrictModel
     thread_id: Annotated[
-        str, Field(min_length=1, description="Thread ID returned by evals_start_judge.")
+        str, Field(min_length=1, description="Thread ID returned by evals_start_evaluator.")
     ]
     message: Annotated[str, Field(min_length=1, description="Message to send to the Plurai agent.")]
 
@@ -161,26 +161,75 @@ def _state_of(ctx: Context[Any, Any, Any]) -> ServerState:
     return cast(ServerState, ctx.request_context.lifespan_context)
 
 
+async def _start_optimize_and_await_classifier(
+    state: ServerState, thread_id: str, message: str, timeout: float
+) -> str | None:
+    """Fire the agent's optimize run as a background task and await the
+    classifier_id appearing in a STATE_SNAPSHOT event mid-stream.
+
+    The SSE stream stays open for the full optimization (~20 min for SLM),
+    so we can't synchronously await ``run_agent``. The background task
+    keeps consuming events; an ``asyncio.Event`` signals the foreground as
+    soon as ``classifier_id`` lands. Returns the classifier_id, or None if
+    it didn't surface within ``timeout``.
+    """
+    classifier_seen = asyncio.Event()
+
+    def on_event(event: dict[str, Any]) -> None:
+        if event.get("type") != "STATE_SNAPSHOT":
+            return
+        snapshot = event.get("snapshot")
+        if not isinstance(snapshot, dict):
+            return
+        cid = cast(dict[str, Any], snapshot).get("classifier_id")
+        if isinstance(cid, str) and cid:
+            state.classifier_id = cid
+            classifier_seen.set()
+
+    async def run_optimize() -> None:
+        try:
+            # timeout=None disables the per-event read timeout. The optimize
+            # SSE stream is intrinsically long-lived (~20 min for SLM) with
+            # potentially long gaps during model training; a per-event
+            # ceiling would kill legitimate runs without protecting against
+            # anything we care about. Background task lifecycle is bounded
+            # by state.background_tasks drain on lifespan shutdown.
+            await state.agent.run_agent(thread_id, message, timeout=None, on_event=on_event)
+        except (httpx.HTTPError, OSError):
+            logger.exception(
+                "Background optimize failed",
+                thread_id=thread_id,
+                message=message[:120],
+            )
+
+    task = asyncio.create_task(run_optimize())
+    state.background_tasks.add(task)
+    task.add_done_callback(state.background_tasks.discard)
+
+    try:
+        await asyncio.wait_for(classifier_seen.wait(), timeout=timeout)
+    except TimeoutError:
+        logger.warning(
+            "Classifier ID did not surface in time",
+            thread_id=thread_id,
+            message=message[:120],
+            timeout=timeout,
+        )
+        return None
+    logger.info("Classifier ID surfaced", classifier_id=state.classifier_id)
+    return state.classifier_id
+
+
 # ── Optimization fast-path (pre-send check) ──────────────────────────────
 
 
-async def _check_optimization_status(state: ServerState) -> dict[str, Any] | None:
+async def _check_optimization_status(
+    state: ServerState, classifier_id: str, slug: str, version: str
+) -> dict[str, Any] | None:
     """If a classifier already has results / is mid-optimization, return a
     short-circuit response. Returning None means the caller should send the
     message to the agent normally."""
-    classifier_id = state.classifier_id
-    if not classifier_id:
-        return None
-
     settings = get_settings()
-    try:
-        classifier: GetClassifierResponse = await state.platform.get_classifier(classifier_id)
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            return None
-        raise
-    slug = classifier.slug
-    version = classifier.default_version.number if classifier.default_version else "1.0.0"
 
     opt = await _fetch_optimization(state, classifier_id, slug, version)
     if opt is None:
@@ -190,7 +239,6 @@ async def _check_optimization_status(state: ServerState) -> dict[str, Any] | Non
         return {
             "status": "already_optimized",
             "message": "Optimization was already completed. Here are the results.",
-            "classifier_id": classifier_id,
             "slug": slug,
             "version": version,
             "endpoint_url": f"{settings.run_url}/ioa/v1/{slug}/{version}",
@@ -204,7 +252,6 @@ async def _check_optimization_status(state: ServerState) -> dict[str, Any] | Non
                 "Optimization is already running. Baseline results are available. "
                 "Wait for optimization to complete, then call evals_get_results."
             ),
-            "classifier_id": classifier_id,
             "slug": slug,
             "version": version,
             "endpoint_url": f"{settings.run_url}/ioa/v1/{slug}/{version}",
@@ -224,39 +271,57 @@ async def _fetch_optimization(
     return None
 
 
+# How long to wait for the agent's STATE_SNAPSHOT to surface the new
+# classifier_id after firing the optimize agent run. Classifier creation
+# happens in the first few seconds of the run; 60s is generous.
+_CLASSIFIER_WAIT_TIMEOUT_S = 60.0
+
+
 async def _handle_optimize(
     state: ServerState, settings: Settings, thread_id: str, message: str
 ) -> dict[str, Any]:
-    """Optimize fast-path: short-circuit if a classifier already has results
-    or is mid-optimization; otherwise fire-and-forget the agent run.
+    """Optimize fast-path.
 
-    Optimization takes ~2 min (LLM) / ~20 min (SLM), so we don't await it —
-    the task ref is held in state.background_tasks so asyncio doesn't GC it.
+    The classifier is created *during* the agent run, and the SLM run keeps
+    the SSE stream open for the full ~20 min. So
+    :func:`_start_optimize_and_await_classifier` fires the run as a
+    background task and resolves once a STATE_SNAPSHOT carrying
+    ``classifier_id`` lands. We then resolve slug/version, run the
+    already-optimized short-circuit, and return a self-sufficient payload
+    that echoes every ID the orchestrator needs.
+
+    If classifier_id doesn't surface in time (rare), return
+    ``optimization_started_pending_id`` so the orchestrator can recover
+    via re-scheduling — never guess an ID. Wait-time guidance lives in the
+    skill (it already told the user how long SLM/LLM take).
     """
-    status = await _check_optimization_status(state)
+    classifier_id = await _start_optimize_and_await_classifier(
+        state, thread_id, message, _CLASSIFIER_WAIT_TIMEOUT_S
+    )
+    if classifier_id is None:
+        # Background task is still running and will populate
+        # state.classifier_id when STATE_SNAPSHOT lands. Skill instructs
+        # the orchestrator to schedule a wake-up and call evals_get_results
+        # (which falls back to state.classifier_id) for recovery.
+        return {
+            "status": "optimization_started_pending_id",
+            "thread_id": thread_id,
+            "url": f"{settings.api_base.rstrip('/')}/thread/{thread_id}",
+        }
+
+    classifier: GetClassifierResponse = await state.platform.get_classifier(classifier_id)
+    slug = classifier.slug
+    version = classifier.default_version.number if classifier.default_version else "1.0.0"
+
+    status = await _check_optimization_status(state, classifier_id, slug, version)
     if status:
         return status
-
-    async def _run_optimize() -> None:
-        try:
-            await state.agent.run_agent(thread_id, message, timeout=600.0)
-        except (httpx.HTTPError, OSError):
-            logger.exception(
-                "Background optimize failed",
-                thread_id=thread_id,
-                message=message[:120],
-            )
-
-    task = asyncio.create_task(_run_optimize())
-    state.background_tasks.add(task)
-    task.add_done_callback(state.background_tasks.discard)
 
     return {
         "status": "optimization_started",
         "message": (
             f"Optimization '{message}' triggered for thread {thread_id}. "
-            "It runs in the background (~2 min for LLM, ~20 min for SLM). "
-            "Use evals_get_results later to check results."
+            "It runs in the background (~2 min for LLM, ~20 min for SLM)."
         ),
         "thread_id": thread_id,
         "url": f"{settings.api_base.rstrip('/')}/thread/{thread_id}",
@@ -288,7 +353,7 @@ def _fallback_payload(questions: list[AskUserQuestion], state: ServerState) -> d
         # send_message must use EXACT formatting. Attach with conditional
         # framing so it's a no-op for the integration-code question.
         extra = (
-            " IF this is the optimization-type question (SLM vs LLM), then after the user "
+            " IF this is the model-choice question (SLM vs LLM), then after the user "
             "chooses, call evals_send_message with EXACTLY message='Optimize [LLM]' or "
             "message='Optimize [SLM]'. One call only. These are hardcoded strings — do not "
             "modify them."
@@ -337,7 +402,7 @@ def _build_elicit_form(questions: list[AskUserQuestion]) -> type[BaseModel]:
 # ── Tool implementations ─────────────────────────────────────────────────
 
 
-async def _start_judge(args: StartJudgeArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
+async def _start_evaluator(args: StartEvaluatorArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
     state = _state_of(ctx)
     settings = get_settings()
 
@@ -407,11 +472,18 @@ async def _send_message(args: SendMessageArgs, ctx: Context[Any, Any, Any]) -> d
             "(1) show the user the agent_response text verbatim; "
             "(2) share the url as a clickable markdown link, describing it as the "
             "place to review/edit the generated data on the Plurai platform; "
-            "(3) call evals_ask_user with the optimization-type question — options "
-            '"SLM — recommended for production, fine-tuned model (~20 min)" '
-            '(value "SLM") and "LLM — recommended for testing/small scale, '
-            'prompt-based (~2 min)" (value "LLM"). '
-            "Do NOT add any extra confirmation question before the optimization ask."
+            "(3) call evals_ask_user with the model-choice question. Use header "
+            '"Model Choice" and question "Which model would you like to generate?". '
+            "Options: "
+            '"SLM - best for production scale (recommended)" (value "SLM") with '
+            'description "Our fine-tuned small-language model with low inference '
+            "cost, realtime latency, and high accuracy. Pro plan only. "
+            '~20 min."; and '
+            '"Optimized LLM - for dev iterations" (value "LLM") with description '
+            '"Our calibration on a large language model, best for local checks '
+            'and quick validations. ~2 min.". '
+            "Do NOT add an explicit Other option, and do NOT add any extra "
+            "confirmation question before this ask."
         )
     return result
 
@@ -420,13 +492,13 @@ async def _send_message(args: SendMessageArgs, ctx: Context[Any, Any, Any]) -> d
 async def _ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
     state = _state_of(ctx)
     # Single gate: only allow ask_user right after a tool that armed
-    # has_questions — start_judge, a send_message that re-armed it, or a
+    # has_questions — start_evaluator, a send_message that re-armed it, or a
     # search_evaluators that returned matches. Stops the model from injecting
     # its own questions before any flow has begun.
     if not state.has_questions:
         return {
             "error": (
-                "You must call evals_start_judge or evals_search_evaluators first. "
+                "You must call evals_start_evaluator or evals_search_evaluators first. "
                 "Do NOT ask your own questions before the flow has begun."
             )
         }
@@ -462,7 +534,7 @@ async def _ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str,
 
 def register(mcp: FastMCP) -> None:
     @mcp.tool(
-        name="evals_start_judge",
+        name="evals_start_evaluator",
         description=(
             "Start building an LLM-as-a-judge evaluator: creates a thread, sends the task "
             "to the Plurai agent, and returns refinement questions. This MUST be your first "
@@ -475,18 +547,18 @@ def register(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
-    async def evals_start_judge(
-        args: StartJudgeArgs, ctx: Context[Any, Any, Any]
+    async def evals_start_evaluator(
+        args: StartEvaluatorArgs, ctx: Context[Any, Any, Any]
     ) -> dict[str, Any]:
         try:
-            return await _start_judge(args, ctx)
+            return await _start_evaluator(args, ctx)
         except (httpx.HTTPStatusError, httpx.TransportError, RuntimeError) as e:
             return format_tool_error(e)
 
     @mcp.tool(
         name="evals_send_message",
         description=(
-            "Send a follow-up message to the Plurai agent. Only use AFTER evals_start_judge. "
+            "Send a follow-up message to the Plurai agent. Only use AFTER evals_start_evaluator. "
             "Used for sending user answers and for triggering optimization. "
             "To trigger optimization, send EXACTLY 'Optimize [LLM]' or 'Optimize [SLM]' "
             "(square brackets are literal). Optimization runs in the background — "
@@ -525,4 +597,4 @@ def register(mcp: FastMCP) -> None:
         return await _ask_user(args, ctx)
 
     # Avoid unused-name warnings under strict linters.
-    _ = (evals_start_judge, evals_send_message, evals_ask_user, Literal)
+    _ = (evals_start_evaluator, evals_send_message, evals_ask_user, Literal)

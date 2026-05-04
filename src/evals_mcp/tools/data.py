@@ -26,7 +26,7 @@ class UploadDataArgs(BaseModel):
     model_config = _StrictModel
     example_set_id: Annotated[
         str,
-        Field(min_length=1, description="Example set ID returned by evals_start_judge."),
+        Field(min_length=1, description="Example set ID returned by evals_start_evaluator."),
     ]
     records: Annotated[
         list[UploadRecord],
@@ -43,7 +43,7 @@ def register(mcp: FastMCP) -> None:
         name="evals_upload_data",
         description=(
             "Upload labeled examples from a user-provided file. Requires `example_set_id` "
-            "returned by evals_start_judge. Only use when the user explicitly provides a "
+            "returned by evals_start_evaluator. Only use when the user explicitly provides a "
             "data file path — do NOT synthesize records."
         ),
         annotations=ToolAnnotations(

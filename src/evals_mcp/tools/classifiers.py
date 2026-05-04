@@ -41,9 +41,6 @@ class SearchEvaluatorsArgs(BaseModel):
 
 class GetResultsArgs(BaseModel):
     model_config = _StrictModel
-    classifier_id: Annotated[
-        str, Field(description="Classifier ID returned by evals_send_message.")
-    ]
     response_format: Annotated[
         ResponseFormat,
         Field(
@@ -57,7 +54,7 @@ class CreateApiKeyArgs(BaseModel):
     model_config = _StrictModel
     name: Annotated[
         str,
-        Field(default="judge-endpoint", description="Display name for the API key."),
+        Field(default="evaluator-endpoint", description="Display name for the API key."),
     ]
 
 
@@ -187,7 +184,7 @@ async def _search_evaluators(args: SearchEvaluatorsArgs, ctx: Context[Any, Any, 
 
     # Arm the ask_user gate only when there are matches to surface — the model
     # is told to follow up with a reuse-vs-create-new question. Empty results
-    # must NOT arm the gate (the flow proceeds silently to start_judge, and
+    # must NOT arm the gate (the flow proceeds silently to start_evaluator, and
     # arming would let the model invent its own pre-flow questions).
     if results:
         state.has_questions = True
@@ -215,16 +212,40 @@ async def _search_evaluators(args: SearchEvaluatorsArgs, ctx: Context[Any, Any, 
 async def _get_results(args: GetResultsArgs, ctx: Context[Any, Any, Any]) -> Any:
     state = _state(ctx)
     settings = get_settings()
-    classifier: GetClassifierResponse = await state.platform.get_classifier(args.classifier_id)
+
+    # State is the single source of truth for classifier_id — populated by
+    # the optimize agent run's streaming callback. On each Claude Code
+    # wake-up the orchestrator just re-calls this tool; if the background
+    # task hasn't yet emitted the classifier (rare), return classifier_pending
+    # so the orchestrator schedules another wake-up rather than guessing.
+    classifier_id = state.classifier_id
+    if not classifier_id:
+        return {
+            "status": "classifier_pending",
+            "message": (
+                "Classifier ID not yet available. The optimize agent run is "
+                "still starting up. Schedule another wake-up and call "
+                "evals_get_results again."
+            ),
+        }
+
+    classifier: GetClassifierResponse = await state.platform.get_classifier(classifier_id)
     slug = classifier.slug
     version = classifier.default_version.number if classifier.default_version else "1.0.0"
 
-    opt = await _fetch_optimization(state, args.classifier_id, slug, version)
+    opt = await _fetch_optimization(state, classifier_id, slug, version)
     baseline = opt.baseline if opt else MetricsView()
     optimized = opt.optimized if opt else MetricsView()
 
+    # Arm the ask_user gate once optimization is fully done — the next step
+    # is asking the user which language to emit the integration snippet in.
+    # While results are still pending, leave the gate alone so the model is
+    # forced to re-schedule a wake-up rather than ask premature questions.
+    if optimized.accuracy is not None:
+        state.has_questions = True
+
     payload: dict[str, Any] = {
-        "classifier_id": args.classifier_id,
+        "classifier_id": classifier_id,
         "slug": slug,
         "version": version,
         "endpoint_url": f"{settings.run_url}/ioa/v1/{slug}/{version}",
@@ -272,7 +293,14 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool(
         name="evals_get_results",
-        description="Get optimization results (accuracy, precision, recall) and endpoint URL.",
+        description=(
+            "Fetch optimization results (accuracy, precision, recall) and endpoint URL "
+            "for the active classifier in this session. Reads classifier_id from "
+            "session state — no IDs are passed in. Returns status='classifier_pending' "
+            "if the optimize agent run hasn't yet emitted classifier_id, or null "
+            "baseline/optimized while optimization is still running. In both cases, "
+            "schedule another wake-up and call again rather than asking the user."
+        ),
         annotations=ToolAnnotations(
             readOnlyHint=True,
             destructiveHint=False,

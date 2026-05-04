@@ -15,4 +15,4 @@ Save the user's Plurai API key so the evals MCP tools can authenticate.
 3. On success the command prints `Saved API key to <path>.` — confirm to the user that they're set up and can now use `/eval`.
 4. On failure it prints an error to stderr — relay it to the user.
 
-Do not invoke any evals MCP tools (e.g. `evals_start_judge`) before the login command finishes successfully — they will fail with `Plurai API key not set.` until the key is saved.
+Do not invoke any evals MCP tools (e.g. `evals_start_evaluator`) before the login command finishes successfully — they will fail with `Plurai API key not set.` until the key is saved.

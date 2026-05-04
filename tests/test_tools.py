@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from typing import Any
 
@@ -18,15 +19,15 @@ from evals_mcp.tools.classifiers import (
     _get_results,
     _search_evaluators,
 )
-from evals_mcp.tools.judge import (
+from evals_mcp.tools.evaluator import (
     AskUserArgs,
     AskUserOption,
     AskUserQuestion,
     SendMessageArgs,
-    StartJudgeArgs,
+    StartEvaluatorArgs,
     _ask_user,
     _send_message,
-    _start_judge,
+    _start_evaluator,
 )
 
 _settings = get_settings()
@@ -65,6 +66,150 @@ async def test_send_message_rejects_bare_optimize(ctx: Any) -> None:
     out = await _send_message(SendMessageArgs(thread_id="t1", message="Optimize"), ctx)
     assert "error" in out
     assert "Optimize [LLM]" in out["error"]
+
+
+async def _drain_background(state: Any) -> None:
+    """Drain any background optimize tasks the test spawned so they don't
+    outlive the httpx_mock client."""
+    for task in list(state.background_tasks):
+        with contextlib.suppress(Exception):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_optimize_writes_classifier_to_state_and_returns_endpoint(
+    httpx_mock: Any, ctx: Any
+) -> None:
+    """The streaming STATE_SNAPSHOT writes classifier_id into session
+    state (single source of truth). The response carries slug/version/
+    endpoint_url for display, but no classifier_id — the orchestrator
+    reads it from state on subsequent get_results calls."""
+    state = ctx.request_context.lifespan_context
+    assert state.classifier_id is None  # baseline: classifier doesn't exist yet
+    httpx_mock.add_response(
+        url=AGENT_API,
+        method="POST",
+        content=_sse_body(
+            [
+                {
+                    "type": "STATE_SNAPSHOT",
+                    "snapshot": {"classifier_id": "cls-abc"},
+                }
+            ]
+        ),
+        headers={"content-type": "text/event-stream"},
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/cls-abc",
+        method="GET",
+        json={"id": "cls-abc", "slug": "my-eval", "defaultVersion": {"number": "1.0.0"}},
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/cls-abc/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/my-eval/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+
+    out = await _send_message(
+        SendMessageArgs(thread_id="thr-1", message="Optimize [SLM]"),
+        ctx,
+    )
+    await _drain_background(state)
+
+    assert out["status"] == "optimization_started"
+    assert "classifier_id" not in out  # state is the SoT; not echoed
+    assert state.classifier_id == "cls-abc"
+    assert out["slug"] == "my-eval"
+    assert out["version"] == "1.0.0"
+    assert "/ioa/v1/my-eval/1.0.0" in out["endpoint_url"]
+
+
+@pytest.mark.asyncio
+async def test_optimize_returns_pending_id_when_classifier_never_emitted(
+    monkeypatch: Any, httpx_mock: Any, ctx: Any
+) -> None:
+    """If the agent never emits a STATE_SNAPSHOT with classifier_id, the
+    poll times out. We must return optimization_started_pending_id (no
+    fabricated ID) so the orchestrator can recover via re-scheduling."""
+    state = ctx.request_context.lifespan_context
+
+    # Shrink the wait budget so the timeout path executes near-instantly.
+    import evals_mcp.tools.evaluator as evaluator_module
+
+    monkeypatch.setattr(evaluator_module, "_CLASSIFIER_WAIT_TIMEOUT_S", 0.05)
+
+    httpx_mock.add_response(
+        url=AGENT_API,
+        method="POST",
+        content=_sse_body([{"type": "MESSAGES_SNAPSHOT", "messages": []}]),
+        headers={"content-type": "text/event-stream"},
+    )
+
+    out = await _send_message(
+        SendMessageArgs(thread_id="thr-1", message="Optimize [LLM]"),
+        ctx,
+    )
+    await _drain_background(state)
+
+    assert out["status"] == "optimization_started_pending_id"
+    assert "classifier_id" not in out
+    assert out["thread_id"] == "thr-1"
+
+
+@pytest.mark.asyncio
+async def test_get_results_arms_ask_user_when_optimization_complete(
+    httpx_mock: Any, ctx: Any
+) -> None:
+    """Once optimized.accuracy is non-null, the next step is the language
+    ask_user — get_results must arm the gate. While results are pending
+    (null accuracy), it must NOT arm the gate so the orchestrator is
+    forced to re-schedule a wake-up rather than ask premature questions."""
+    state = ctx.request_context.lifespan_context
+
+    # Pending case → gate stays closed.
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/c-1",
+        method="GET",
+        json={"slug": "s-1", "defaultVersion": {"number": "1.0.0"}},
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/c-1/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/s-1/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+    state.has_questions = False
+    state.classifier_id = "c-1"
+    await _get_results(GetResultsArgs(response_format="json"), ctx)
+    assert state.has_questions is False
+
+    # Completed case → gate armed.
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/c-2",
+        method="GET",
+        json={"slug": "s-2", "defaultVersion": {"number": "1.0.0"}},
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/c-2/versions/1.0.0/optimization",
+        method="GET",
+        json={
+            "baseline": {"accuracy": 0.6, "precision": 0.6, "recall": 0.6},
+            "optimized": {"accuracy": 0.9, "precision": 0.9, "recall": 0.9},
+        },
+    )
+    state.has_questions = False
+    state.classifier_id = "c-2"
+    await _get_results(GetResultsArgs(response_format="json"), ctx)
+    assert state.has_questions is True
 
 
 # ── search_evaluators pagination + format ────────────────────────────────
@@ -220,17 +365,31 @@ async def test_get_results_returns_empty_metrics_when_no_optimization(
         method="GET",
         status_code=404,
     )
-    out = await _get_results(GetResultsArgs(classifier_id="c-1", response_format="json"), ctx)
+    state = ctx.request_context.lifespan_context
+    state.classifier_id = "c-1"
+    out = await _get_results(GetResultsArgs(response_format="json"), ctx)
     assert isinstance(out, dict)
     assert out["baseline"] == {"accuracy": None, "precision": None, "recall": None}
     assert out["optimized"] == {"accuracy": None, "precision": None, "recall": None}
 
 
-# ── start_judge happy path ───────────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_get_results_returns_pending_when_state_empty(ctx: Any) -> None:
+    """If state.classifier_id is unset (rare: pending_id from a prior
+    Optimize call), get_results signals classifier_pending so the
+    orchestrator schedules another wake-up rather than guessing an ID."""
+    state = ctx.request_context.lifespan_context
+    state.classifier_id = None
+    out = await _get_results(GetResultsArgs(response_format="json"), ctx)
+    assert isinstance(out, dict)
+    assert out["status"] == "classifier_pending"
+
+
+# ── start_evaluator happy path ───────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_start_judge_happy_path(httpx_mock: Any, ctx: Any) -> None:
+async def test_start_evaluator_happy_path(httpx_mock: Any, ctx: Any) -> None:
     httpx_mock.add_response(
         url=f"{PLATFORM_API}/threads",
         method="POST",
@@ -253,8 +412,8 @@ async def test_start_judge_happy_path(httpx_mock: Any, ctx: Any) -> None:
         headers={"content-type": "text/event-stream"},
     )
 
-    out = await _start_judge(
-        StartJudgeArgs(task_description="Classify outputs as safe or unsafe"),
+    out = await _start_evaluator(
+        StartEvaluatorArgs(task_description="Classify outputs as safe or unsafe"),
         ctx,
     )
     assert out["thread_id"] == "thread-1"
@@ -268,7 +427,7 @@ async def test_start_judge_happy_path(httpx_mock: Any, ctx: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_ask_user_requires_start_judge_first(ctx: Any) -> None:
+async def test_ask_user_requires_start_evaluator_first(ctx: Any) -> None:
     out = await _ask_user(
         AskUserArgs(
             questions=[

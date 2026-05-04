@@ -4,12 +4,14 @@ The Plurai agent endpoint at ``/api/agent/api/copilotkit`` accepts a
 single envelope shape and replies with a Server-Sent Events stream of
 ``MESSAGES_SNAPSHOT`` / ``STATE_SNAPSHOT`` / etc. events. Tools call
 :meth:`AgentClient.run_agent`, get back a list of typed events, and
-walk them with helpers in ``tools/judge.py``.
+walk them with helpers in ``tools/evaluator.py``.
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
+from typing import Any
 
 from .base import BaseHttpClient
 from .models import AgentEnvelope, AgentEvent, AgentMessage, AgentRunBody
@@ -32,7 +34,15 @@ class AgentClient(BaseHttpClient):
         *,
         run_id: str | None = None,
         timeout: float | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[AgentEvent]:
+        """Execute an agent run; return all SSE events once the stream closes.
+
+        ``on_event`` (optional) is fired synchronously for each decoded event
+        as it arrives — used by callers (e.g. the optimize fast-path) that
+        need to extract state mid-stream while the agent run is still
+        ongoing in the background.
+        """
         envelope = AgentEnvelope(
             method="agent/run",
             params={"agentId": "agent"},
@@ -48,5 +58,6 @@ class AgentClient(BaseHttpClient):
             RUN_PATH,
             envelope.model_dump(by_alias=True),
             timeout=timeout,
+            on_event=on_event,
         )
         return [AgentEvent.model_validate(e) for e in raw]
