@@ -14,11 +14,15 @@ In any Claude Code session:
 
 ```
 /plugin marketplace add plurai-ai/plurai-plugins
-/plugin install evals@plurai-plugins
-/reload-plugins
 ```
 
-The plugin ships its own MCP server config, so Claude Code spawns the server automatically — no manual `.mcp.json` edits.
+```
+/plugin install evals@plurai-plugins
+```
+
+```
+/reload-plugins
+```
 
 ## Use it
 
@@ -33,5 +37,4 @@ The plugin will:
 3. **Optimize the evaluator** (LLM- or SLM-based, depending on the task).
 4. **Return a deployed HTTPS endpoint** plus a per-evaluator API key you can call from your application.
 
-> The evaluator key returned at step 4 is **separate** from the account key you used to sign in: the account key authenticates *you* to Plurai; the evaluator key authenticates *your app* to one specific deployed evaluator.
 
