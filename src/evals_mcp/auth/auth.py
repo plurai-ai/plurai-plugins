@@ -1,15 +1,17 @@
 """User-API-key auth for the evals MCP server.
 
-The Plurai REST API and CopilotKit agent endpoints both accept the user's
+Both the Plurai REST API and the agent endpoint accept the user's
 long-lived API key as ``Authorization: Bearer ak…``. This module:
 
 - resolves the key from a JSON file at ``~/.config/evals/credentials.json``,
-- exposes ``platform_headers`` / ``agent_headers`` returning the bearer
+- exposes :func:`bearer_headers` returning the ``Authorization: Bearer``
   header (raises :class:`~evals_mcp.errors.MissingApiKeyError` when no
   key is configured, :class:`~evals_mcp.errors.CorruptCredentialsError`
-  when the file exists but is broken),
-- provides a tiny CLI (``login --key``, ``logout``, ``status``) used by
-  the ``/login`` slash command.
+  when the file exists but is broken). The result is memoised against
+  the file's (inode, mtime_ns), so a fresh `auth login` (which rewrites
+  the file) is picked up on the next call without explicit invalidation.
+- provides a tiny CLI (``login --key``, ``logout``, ``status``) invoked
+  inline by the model when an evals tool reports missing/invalid creds.
 
 Self-contained — usable standalone for testing:
 
@@ -27,8 +29,12 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
+import structlog
+
 from ..config import get_settings
 from ..errors import CorruptCredentialsError, MissingApiKeyError
+
+logger: Any = structlog.get_logger(__name__)
 
 
 def _credentials_path() -> Path:
@@ -107,22 +113,56 @@ def delete_api_key() -> bool:
     return True
 
 
-def bearer_headers() -> dict[str, str]:
-    key = load_api_key()
-    if not key:
-        raise MissingApiKeyError()
-    return {"Authorization": f"Bearer {key}"}
+class BearerCache:
+    """Mtime/inode-aware cache for the ``Authorization: Bearer`` header.
 
+    `auth login` rewrites the credentials file, which bumps both st_ino
+    and st_mtime_ns; the next call to :meth:`headers` notices the
+    mismatch and re-reads. The path is part of the cache key so a
+    settings change (e.g. tests redirecting ``HOME``) doesn't see stale
+    entries.
 
-# Kept as separate seams for the platform REST API vs the agent endpoint so
-# callers can use the role-appropriate function — they share a key today but
-# may diverge if the agent surface ever requires different scopes/headers.
-def platform_headers() -> dict[str, str]:
-    return bearer_headers()
+    Instantiate once per server lifespan and pass :meth:`headers` as the
+    ``headers_provider`` to HTTP clients.
+    """
 
+    def __init__(self) -> None:
+        self._path: Path | None = None
+        self._stat_key: tuple[int, int] | None = None
+        self._headers: dict[str, str] | None = None
 
-def agent_headers() -> dict[str, str]:
-    return bearer_headers()
+    def headers(self) -> dict[str, str]:
+        """Return ``{"Authorization": "Bearer <key>"}``, re-reading the file
+        only when its (inode, mtime_ns) has changed. Raises
+        :class:`MissingApiKeyError` when no key is configured.
+
+        Not thread-safe — single asyncio event loop only. The three-field
+        update at the bottom is a single critical section under that model.
+        """
+        path = _credentials_path()
+        try:
+            st = path.stat()
+            stat_key: tuple[int, int] | None = (st.st_ino, st.st_mtime_ns)
+        except FileNotFoundError:
+            stat_key = None
+        except OSError as e:
+            # Permission denied, NFS hiccup, symlink loop, etc. Surface as
+            # CorruptCredentialsError so the user gets the actionable
+            # "credentials file is broken — re-run auth login" message
+            # instead of a generic ``Unexpected OSError`` envelope.
+            raise CorruptCredentialsError(path, str(e)) from e
+        if path == self._path and stat_key == self._stat_key and self._headers is not None:
+            return self._headers
+        key = load_api_key()
+        if not key:
+            raise MissingApiKeyError()
+        logger.info("BearerCache refreshed from disk")
+        # Assign cache only after the read succeeds so a partial failure
+        # leaves the previous (still-valid) cache untouched.
+        self._headers = {"Authorization": f"Bearer {key}"}
+        self._path = path
+        self._stat_key = stat_key
+        return self._headers
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────

@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from evals_mcp import auth
+from evals_mcp.config import get_settings
 from evals_mcp.errors import CorruptCredentialsError, MissingApiKeyError
 
 
@@ -16,6 +17,7 @@ from evals_mcp.errors import CorruptCredentialsError, MissingApiKeyError
 def creds_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect ``~`` into a tmp dir so the credentials file lands there."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    get_settings.cache_clear()
     return tmp_path / ".config" / "evals" / "credentials.json"
 
 
@@ -70,21 +72,45 @@ def test_delete_api_key(creds_path: Path) -> None:
     assert auth.delete_api_key() is False
 
 
-def test_platform_headers_raises_when_missing(creds_path: Path) -> None:
+def test_bearer_cache_raises_when_missing(creds_path: Path) -> None:
+    _ = creds_path
+    cache = auth.BearerCache()
     with pytest.raises(MissingApiKeyError) as exc:
-        auth.platform_headers()
-    assert "evals_mcp auth login" in str(exc.value)
+        cache.headers()
+    # Error envelope must direct the orchestrator to the inline auth-login
+    # flow rather than bouncing back to the user — the whole point of the
+    # directive wording.
+    assert "auth login" in str(exc.value)
+    assert "retry" in str(exc.value)
 
 
-def test_agent_headers_raises_when_missing(creds_path: Path) -> None:
-    with pytest.raises(MissingApiKeyError):
-        auth.agent_headers()
-
-
-def test_platform_and_agent_headers_match_after_save(creds_path: Path) -> None:
+def test_bearer_cache_returns_authorization(creds_path: Path) -> None:
+    _ = creds_path
     auth.save_api_key("ak_test_xyz")
-    assert auth.platform_headers() == {"Authorization": "Bearer ak_test_xyz"}
-    assert auth.agent_headers() == {"Authorization": "Bearer ak_test_xyz"}
+    assert auth.BearerCache().headers() == {"Authorization": "Bearer ak_test_xyz"}
+
+
+def test_bearer_cache_picks_up_file_change(creds_path: Path) -> None:
+    """A second save must be reflected on the next call — the mtime/inode
+    cache is what makes a mid-session `auth login` work without a restart."""
+    _ = creds_path
+    cache = auth.BearerCache()
+    auth.save_api_key("ak_old")
+    assert cache.headers() == {"Authorization": "Bearer ak_old"}
+    auth.save_api_key("ak_new")
+    assert cache.headers() == {"Authorization": "Bearer ak_new"}
+
+
+def test_bearer_cache_raises_after_file_deleted(creds_path: Path) -> None:
+    """A successful read followed by deletion must surface as
+    MissingApiKeyError on the next call rather than serving stale headers."""
+    _ = creds_path
+    cache = auth.BearerCache()
+    auth.save_api_key("ak_test_xyz")
+    cache.headers()  # populate cache
+    auth.delete_api_key()
+    with pytest.raises(MissingApiKeyError):
+        cache.headers()
 
 
 def test_load_api_key_raises_on_corrupt_json(creds_path: Path) -> None:
@@ -93,7 +119,10 @@ def test_load_api_key_raises_on_corrupt_json(creds_path: Path) -> None:
     with pytest.raises(CorruptCredentialsError) as exc:
         auth.load_api_key()
     assert str(creds_path) in str(exc.value)
-    assert "evals_mcp auth login" in str(exc.value)
+    # Same inline-auth directive as MissingApiKeyError so the orchestrator
+    # recovers identically from "no key" and "broken key" states.
+    assert "auth login" in str(exc.value)
+    assert "retry" in str(exc.value)
 
 
 def test_load_api_key_raises_on_non_string_value(creds_path: Path) -> None:

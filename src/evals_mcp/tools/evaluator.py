@@ -1,22 +1,17 @@
-"""Evaluator-flow tools: start_evaluator, send_message, ask_user.
-
-`evals_send_message` includes a fast-path that short-circuits a duplicate
-optimize when the classifier has already-completed or in-progress results.
-"""
+"""Evaluator-flow tools: start_evaluator, send_message, ask_user."""
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from typing import Annotated, Any, Literal, TypedDict, cast
+from typing import Annotated, Any, cast
 
 import httpx
 import structlog
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from ..clients import AgentEvent, GetClassifierResponse, OptimizationView
+from ..clients import GetClassifierResponse, ThreadStateView
 from ..config import Settings, get_settings
 from ..errors import format_tool_error
 from ..state import ServerState
@@ -77,82 +72,7 @@ class AskUserArgs(BaseModel):
     ]
 
 
-class ChatMessage(TypedDict):
-    role: str
-    content: str
-
-
 # ── Helpers ──────────────────────────────────────────────────────────────
-
-
-@dataclass(frozen=True)
-class AgentStateSnapshot:
-    """Latest values pulled from the agent's STATE_SNAPSHOT events.
-
-    A non-null ``commit_id`` is the agent's signal that the initial flow
-    (synthetic data generation) is complete — it's the ID of the committed
-    example set the user can now review.
-    """
-
-    classifier_id: str | None = None
-    commit_id: str | None = None
-
-
-@dataclass(frozen=True)
-class RunResult:
-    conversation: list[ChatMessage]
-    snapshot: AgentStateSnapshot
-
-
-def _parse_run(events: list[AgentEvent]) -> RunResult:
-    """Single pass over the event stream: latest MESSAGES_SNAPSHOT wins for
-    conversation; latest STATE_SNAPSHOT values win for snapshot."""
-    conversation: list[ChatMessage] = []
-    classifier_id: str | None = None
-    commit_id: str | None = None
-    event_types: dict[str, int] = {}
-    last_snapshot_keys: list[str] = []
-    for event in events:
-        event_types[event.type] = event_types.get(event.type, 0) + 1
-        if event.type == "MESSAGES_SNAPSHOT":
-            extra = event.model_dump(exclude={"type"})
-            messages = cast(list[dict[str, Any]], extra.get("messages") or [])
-            conversation = [
-                ChatMessage(role=str(m.get("role", "")), content=str(m.get("content", "")))
-                for m in messages
-                if m.get("content") and m.get("content") != "..."
-            ]
-        elif event.type == "STATE_SNAPSHOT":
-            extra = event.model_dump(exclude={"type"})
-            snapshot = extra.get("snapshot")
-            if not isinstance(snapshot, dict):
-                continue
-            snap = cast(dict[str, Any], snapshot)
-            last_snapshot_keys = sorted(snap.keys())
-            cid = snap.get("classifier_id")
-            if isinstance(cid, str):
-                classifier_id = cid
-            commit = snap.get("commit_id")
-            if isinstance(commit, str) and commit:
-                commit_id = commit
-    logger.info(
-        "agent_run_parsed",
-        event_types=event_types,
-        last_snapshot_keys=last_snapshot_keys,
-        classifier_id=classifier_id,
-        commit_id=commit_id,
-    )
-    return RunResult(
-        conversation=conversation,
-        snapshot=AgentStateSnapshot(classifier_id=classifier_id, commit_id=commit_id),
-    )
-
-
-def _last_assistant(conversation: list[ChatMessage]) -> str:
-    for msg in reversed(conversation):
-        if msg["role"] == "assistant":
-            return msg["content"]
-    return ""
 
 
 def _state_of(ctx: Context[Any, Any, Any]) -> ServerState:
@@ -163,9 +83,9 @@ async def _start_optimize_and_await_classifier(
     state: ServerState, thread_id: str, message: str, timeout: float
 ) -> str | None:
     """Fire the agent's optimize run as a background task and await the
-    classifier_id appearing in a STATE_SNAPSHOT event mid-stream.
+    classifier_id appearing in an intermediate-state event mid-stream.
 
-    The SSE stream stays open for the full optimization (~20 min for SLM),
+    The run stream stays open for the full optimization (~20 min for SLM),
     so we can't synchronously await ``run_agent``. The background task
     keeps consuming events; an ``asyncio.Event`` signals the foreground as
     soon as ``classifier_id`` lands. Returns the classifier_id, or None if
@@ -173,34 +93,35 @@ async def _start_optimize_and_await_classifier(
     """
     classifier_seen = asyncio.Event()
     captured_id: str | None = None
+    captured_error: BaseException | None = None
 
-    def on_event(event: dict[str, Any]) -> None:
+    def on_state(snapshot: ThreadStateView) -> None:
         nonlocal captured_id
-        if event.get("type") != "STATE_SNAPSHOT":
-            return
-        snapshot = event.get("snapshot")
-        if not isinstance(snapshot, dict):
-            return
-        cid = cast(dict[str, Any], snapshot).get("classifier_id")
-        if isinstance(cid, str) and cid:
-            captured_id = cid
+        if snapshot.classifier_id:
+            captured_id = snapshot.classifier_id
             classifier_seen.set()
 
     async def run_optimize() -> None:
+        # Failures that happen before classifier_id surfaces are captured
+        # and re-raised by the foreground so the tool wrapper can map them
+        # (e.g. MissingApiKeyError → inline auth prompt) instead of letting
+        # the foreground time out with a misleading "no classifier_id" error.
+        nonlocal captured_error
         try:
-            # timeout=None disables the per-event read timeout. The optimize
-            # SSE stream is intrinsically long-lived (~20 min for SLM) with
-            # potentially long gaps during model training; a per-event
-            # ceiling would kill legitimate runs without protecting against
-            # anything we care about. Background task lifecycle is bounded
-            # by state.background_tasks drain on lifespan shutdown.
-            await state.agent.run_agent(thread_id, message, timeout=None, on_event=on_event)
-        except (httpx.HTTPError, OSError):
+            await state.agent.run_agent(thread_id, message, on_state=on_state)
+        except (httpx.HTTPError, OSError, RuntimeError, ValidationError) as e:
+            captured_error = e
             logger.exception(
                 "Background optimize failed",
                 thread_id=thread_id,
                 message=message[:120],
+                classifier_already_surfaced=captured_id is not None,
             )
+        finally:
+            # Unblock the foreground in every termination case so a stream
+            # that ends without emitting classifier_id (legitimate completion
+            # or error) doesn't burn the full wait budget.
+            classifier_seen.set()
 
     task = asyncio.create_task(run_optimize())
     state.background_tasks.add(task)
@@ -216,67 +137,19 @@ async def _start_optimize_and_await_classifier(
             timeout=timeout,
         )
         return None
-    logger.info("Classifier ID surfaced", classifier_id=captured_id)
-    return captured_id
-
-
-# ── Optimization fast-path (pre-send check) ──────────────────────────────
-
-
-async def _check_optimization_status(
-    state: ServerState, classifier_id: str, slug: str, version: str
-) -> dict[str, Any] | None:
-    """If a classifier already has results / is mid-optimization, return a
-    short-circuit response. Returning None means the caller should send the
-    message to the agent normally."""
-    settings = get_settings()
-
-    opt = await _fetch_optimization(state, classifier_id, slug, version)
-    if opt is None:
-        return None
-
-    if opt.optimized.accuracy is not None:
-        return {
-            "status": "already_optimized",
-            "message": "Optimization was already completed. Here are the results.",
-            "classifier_id": classifier_id,
-            "slug": slug,
-            "version": version,
-            "endpoint_url": f"{settings.run_url}/ioa/v1/{slug}/{version}",
-            "baseline": opt.baseline.model_dump(),
-            "optimized": opt.optimized.model_dump(),
-        }
-    if opt.baseline.accuracy is not None:
-        return {
-            "status": "optimization_in_progress",
-            "message": (
-                "Optimization is already running. Baseline results are available. "
-                "Wait for optimization to complete, then call evals_get_results."
-            ),
-            "classifier_id": classifier_id,
-            "slug": slug,
-            "version": version,
-            "endpoint_url": f"{settings.run_url}/ioa/v1/{slug}/{version}",
-            "baseline": opt.baseline.model_dump(),
-        }
+    if captured_id is not None:
+        logger.info("Classifier ID surfaced", classifier_id=captured_id)
+        return captured_id
+    if captured_error is not None:
+        # Background failed before classifier_id surfaced — re-raise so the
+        # tool wrapper formats it (auth prompts, 401s, transport errors)
+        # instead of the foreground returning None and producing a generic
+        # "no classifier_id emitted" timeout.
+        raise captured_error
     return None
 
 
-async def _fetch_optimization(
-    state: ServerState, classifier_id: str, slug: str, version: str
-) -> OptimizationView | None:
-    """Try classifier UUID first, then slug. None from both → no run yet."""
-    for identifier in (classifier_id, slug):
-        opt = await state.platform.get_optimization(identifier, version)
-        if opt is not None:
-            return opt
-    return None
-
-
-# How long to wait for the agent's STATE_SNAPSHOT to surface the new
-# classifier_id after firing the optimize agent run. Classifier creation
-# happens in the first few seconds of the run; 60s is generous.
-_CLASSIFIER_WAIT_TIMEOUT_S = 60.0
+# ── Optimize handler ─────────────────────────────────────────────────────
 
 
 async def _handle_optimize(
@@ -285,39 +158,33 @@ async def _handle_optimize(
     """Optimize fast-path.
 
     The classifier is created *during* the agent run, and the SLM run keeps
-    the SSE stream open for the full ~20 min. So
+    the run stream open for the full ~20 min. So
     :func:`_start_optimize_and_await_classifier` fires the run as a
-    background task and resolves once a STATE_SNAPSHOT carrying
-    ``classifier_id`` lands. We then resolve slug/version, run the
-    already-optimized short-circuit, and return a self-sufficient payload
-    that echoes every ID the orchestrator needs.
+    background task and resolves once an intermediate-state event carrying
+    ``classifier_id`` lands. We then resolve slug/version and return a
+    self-sufficient payload that echoes every ID the orchestrator needs.
 
-    If classifier_id doesn't surface in time (rare), return
-    ``optimization_started_pending_id`` so the orchestrator can recover
-    via re-scheduling — never guess an ID. Wait-time guidance lives in the
-    skill (it already told the user how long SLM/LLM take).
+    If classifier_id doesn't surface within ``classifier_wait_timeout_s``
+    (rare), raise ``RuntimeError`` so the orchestrator gets a clean error
+    envelope and can retry from scratch — never guess an ID.
     """
     classifier_id = await _start_optimize_and_await_classifier(
-        state, thread_id, message, _CLASSIFIER_WAIT_TIMEOUT_S
+        state, thread_id, message, settings.classifier_wait_timeout_s
     )
     if classifier_id is None:
-        # The optimize SSE stream opened, but no STATE_SNAPSHOT carrying
-        # classifier_id arrived within the wait budget. Without an ID
-        # there's no programmatic recovery — raise so the orchestrator
-        # gets a clean error envelope and can retry from scratch.
+        # The optimize stream opened, but no intermediate-state event
+        # carrying classifier_id arrived within the wait budget. Without
+        # an ID there's no programmatic recovery — raise so the
+        # orchestrator gets a clean error envelope and can retry from scratch.
         raise RuntimeError(
             f"Optimize triggered for thread {thread_id} but no classifier_id "
-            f"emitted within {_CLASSIFIER_WAIT_TIMEOUT_S:.0f}s — "
+            f"emitted within {settings.classifier_wait_timeout_s:.0f}s — "
             f"check {settings.api_base.rstrip('/')}/thread/{thread_id} and retry."
         )
 
     classifier: GetClassifierResponse = await state.platform.get_classifier(classifier_id)
     slug = classifier.slug
     version = classifier.default_version.number if classifier.default_version else "1.0.0"
-
-    status = await _check_optimization_status(state, classifier_id, slug, version)
-    if status:
-        return status
 
     return {
         "status": "optimization_started",
@@ -328,7 +195,7 @@ async def _handle_optimize(
         "classifier_id": classifier_id,
         "slug": slug,
         "version": version,
-        "endpoint_url": f"{settings.run_url}/ioa/v1/{slug}/{version}",
+        "endpoint_url": f"{settings.run_base}/ioa/v1/{slug}/{version}",
         "thread_id": thread_id,
         "url": f"{settings.api_base.rstrip('/')}/thread/{thread_id}",
     }
@@ -343,9 +210,9 @@ async def _start_evaluator(args: StartEvaluatorArgs, ctx: Context[Any, Any, Any]
 
     thread = await state.platform.create_thread()
 
-    events = await state.agent.run_agent(thread.id, args.task_description)
-    run = _parse_run(events)
-    agent_response = _last_assistant(run.conversation)
+    await state.agent.run_agent(thread.id, args.task_description)
+    snapshot = await state.agent.get_state(thread.id)
+    agent_response = snapshot.last_assistant_message()
     state.has_questions = True
 
     return {
@@ -380,25 +247,23 @@ async def _send_message(args: SendMessageArgs, ctx: Context[Any, Any, Any]) -> d
     if normalized.startswith("optimize"):
         return await _handle_optimize(state, settings, thread_id, message)
 
-    events = await state.agent.run_agent(thread_id, message)
-    run = _parse_run(events)
-    classifier_id = run.snapshot.classifier_id
-    agent_response = _last_assistant(run.conversation)
-    state.commit_id = run.snapshot.commit_id
+    await state.agent.run_agent(thread_id, message)
+    snapshot = await state.agent.get_state(thread_id)
+    state.committed = snapshot.commit_id is not None
 
     result: dict[str, Any] = {
-        "agent_response": agent_response,
-        "message_count": len(run.conversation),
+        "agent_response": snapshot.last_assistant_message(),
+        "message_count": len(snapshot.messages),
     }
-    if classifier_id:
-        result["classifier_id"] = classifier_id
+    if snapshot.classifier_id:
+        result["classifier_id"] = snapshot.classifier_id
 
     # Re-arm so the model can call evals_ask_user next, whether the agent
     # came back with another refinement question or just finished the
     # initial flow and the next step is the SLM/LLM choice.
     state.has_questions = True
 
-    if state.commit_id is not None:
+    if state.committed:
         result["url"] = f"{settings.api_base.rstrip('/')}/thread/{thread_id}"
         result["instructions"] = (
             "The synthetic examples are ready. You MUST do all three in this turn: "
@@ -447,7 +312,7 @@ async def _ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str,
     state.has_questions = False
 
     extra = ""
-    if state.commit_id is not None:
+    if state.committed:
         # Post-initial-flow, the most consequential question is SLM-vs-LLM,
         # where the follow-up send_message must use EXACT formatting. The
         # conditional framing makes this a no-op for other questions (e.g.
@@ -500,7 +365,14 @@ def register(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         try:
             return await _start_evaluator(args, ctx)
-        except (httpx.HTTPStatusError, httpx.TransportError, RuntimeError) as e:
+        except (
+            httpx.HTTPStatusError,
+            httpx.TransportError,
+            RuntimeError,
+            ValidationError,
+            ValueError,
+        ) as e:
+            logger.exception("evals_start_evaluator failed")
             return format_tool_error(e)
 
     @mcp.tool(
@@ -524,7 +396,14 @@ def register(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         try:
             return await _send_message(args, ctx)
-        except (httpx.HTTPStatusError, httpx.TransportError, RuntimeError) as e:
+        except (
+            httpx.HTTPStatusError,
+            httpx.TransportError,
+            RuntimeError,
+            ValidationError,
+            ValueError,
+        ) as e:
+            logger.exception("evals_send_message failed")
             return format_tool_error(e)
 
     @mcp.tool(
@@ -545,4 +424,4 @@ def register(mcp: FastMCP) -> None:
         return await _ask_user(args, ctx)
 
     # Avoid unused-name warnings under strict linters.
-    _ = (evals_start_evaluator, evals_send_message, evals_ask_user, Literal)
+    _ = (evals_start_evaluator, evals_send_message, evals_ask_user)

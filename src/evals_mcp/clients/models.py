@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
@@ -147,50 +147,3 @@ class CreateExampleFileResponse(BaseModel):
     id: str | None = None
     file_name: str | None = None
     example_set_id: str | None = None
-
-
-# ---------------------------------------------------------------------------
-# Agent: CopilotKit envelope + events
-# ---------------------------------------------------------------------------
-
-
-class AgentMessage(BaseModel):
-    model_config = _StrictModel
-
-    id: str
-    role: Literal["user", "assistant"]
-    content: str
-
-
-class AgentRunBody(BaseModel):
-    model_config = _StrictModel
-
-    thread_id: str
-    run_id: str
-    state: dict[str, Any] = Field(default_factory=lambda: {})
-    messages: list[AgentMessage]
-    tools: list[Any] = Field(default_factory=lambda: [])
-    context: list[Any] = Field(default_factory=lambda: [])
-    forwarded_props: dict[str, Any] = Field(default_factory=lambda: {})
-
-
-class AgentEnvelope(BaseModel):
-    model_config = _StrictModel
-
-    method: Literal["agent/run"]
-    params: dict[str, Any]
-    body: AgentRunBody
-
-
-class AgentEvent(BaseModel):
-    """A single SSE event from the CopilotKit agent.
-
-    Loose by design: the agent emits multiple event types (MESSAGES_SNAPSHOT,
-    STATE_SNAPSHOT, TOOL_CALL, …) and we don't model every variant. Tools
-    introspect ``type`` and read whatever sibling fields they need via
-    ``model_extra`` / ``model_dump``.
-    """
-
-    model_config = ConfigDict(extra="allow", populate_by_name=True)
-
-    type: str = ""

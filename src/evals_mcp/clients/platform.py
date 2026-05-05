@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from typing import Any, Literal, cast
 
-import httpx
-
 from .base import BaseHttpClient
 from .models import (
     CreateApiKeyRequest,
@@ -55,14 +53,13 @@ class PlatformClient(BaseHttpClient):
 
     async def get_optimization(self, identifier: str, version: str) -> OptimizationView | None:
         """Fetch optimization results. Returns ``None`` on 404 (no run yet)."""
-        try:
-            resp = await self._request_authed(
-                "GET", f"/classifiers/{identifier}/versions/{version}/optimization"
-            )
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 404:
-                return None
-            raise
+        resp = await self._request_authed(
+            "GET",
+            f"/classifiers/{identifier}/versions/{version}/optimization",
+            expected_error_codes=frozenset({404}),
+        )
+        if resp.status_code == 404:
+            return None
         return OptimizationView.model_validate(resp.json())
 
     # -- API keys --------------------------------------------------------------

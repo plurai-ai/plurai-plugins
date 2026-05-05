@@ -1,23 +1,22 @@
-"""Shared HTTP client infrastructure: retry, dynamic auth, and SSE.
+"""Shared HTTP client infrastructure: retry and dynamic headers.
 
-Auth is supplied per-request via ``headers_provider``; an optional
-``auth_refresh`` hook is invoked once on 401 so the client can
-transparently re-authenticate (Clerk JWT, Chrome cookies, broker flow).
+Auth headers are fetched per-request via ``headers_provider``; the
+provider is expected to track its own source (e.g. mtime polling on a
+credentials file) so that a fresh `auth login` is picked up on the very
+next request without a restart. 401 propagates to the caller — the
+provider, not this client, owns refresh policy.
 
 Subclasses set ``_client_label`` and add domain-specific methods on top
-of :meth:`_request_authed` (JSON requests) and :meth:`_stream_sse_authed`
-(server-sent events).
+of :meth:`_request_authed` (JSON requests).
 """
 
 from __future__ import annotations
 
-import json
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, Self
 
 import httpx
 import structlog
-from httpx_sse import aconnect_sse
 from pydantic import BaseModel, Field, model_validator
 from tenacity import (
     AsyncRetrying,
@@ -29,8 +28,7 @@ from tenacity import (
 
 logger: Any = structlog.get_logger(__name__)
 
-HeadersProvider = Callable[[], Awaitable[Mapping[str, str]]]
-AuthRefresh = Callable[[], Awaitable[None]]
+HeadersProvider = Callable[[], Mapping[str, str]]
 
 
 # ---------------------------------------------------------------------------
@@ -87,12 +85,12 @@ class BaseHttpClientConfig(BaseModel):
 
 
 class BaseHttpClient:
-    """Async HTTP client with retry, dynamic auth, and SSE support.
+    """Async HTTP client with retry and dynamic headers.
 
-    Auth is supplied per-request via ``headers_provider``; on a 401, the
-    optional ``auth_refresh`` hook is invoked once and the request retried
-    with refreshed headers. Tenacity handles transient failures (5xx, 429,
-    408, transport errors).
+    Auth headers are fetched per-request via ``headers_provider``; the
+    provider is responsible for refresh policy (typically mtime polling
+    on a credentials file). 401 propagates to the caller. Tenacity
+    handles transient failures (5xx, 429, 408, transport errors).
     """
 
     _client_label: str = "HTTP"
@@ -102,11 +100,9 @@ class BaseHttpClient:
         config: BaseHttpClientConfig,
         *,
         headers_provider: HeadersProvider,
-        auth_refresh: AuthRefresh | None = None,
     ) -> None:
         self._config = config
         self._headers_provider = headers_provider
-        self._auth_refresh = auth_refresh
         self._client: httpx.AsyncClient | None = None
 
     async def __aenter__(self) -> Self:
@@ -138,21 +134,16 @@ class BaseHttpClient:
         json_body: Any = None,
         headers: Mapping[str, str] | None = None,
         timeout: float | None = None,
+        expected_error_codes: frozenset[int] = frozenset(),
     ) -> httpx.Response:
         kwargs: dict[str, Any] = {"params": params, "json": json_body, "headers": headers}
         if timeout is not None:
             kwargs["timeout"] = timeout
         resp = await self._http.request(method, path, **kwargs)
+        if resp.status_code in expected_error_codes:
+            return resp
         if resp.is_error:
-            # 401 is downgraded to debug because `_request_authed` will
-            # invoke `auth_refresh` and retry — escalating only matters
-            # if the *retry* fails, which is logged separately.
-            if resp.status_code == 401 and self._auth_refresh is not None:
-                log = logger.debug
-            elif resp.status_code in _RETRYABLE_STATUS_CODES:
-                log = logger.warning
-            else:
-                log = logger.error
+            log = logger.warning if resp.status_code in _RETRYABLE_STATUS_CODES else logger.error
             log(
                 f"{self._client_label} error",
                 method=method,
@@ -172,6 +163,7 @@ class BaseHttpClient:
         json_body: Any = None,
         headers: Mapping[str, str] | None = None,
         timeout: float | None = None,
+        expected_error_codes: frozenset[int] = frozenset(),
     ) -> httpx.Response:
         retrying = AsyncRetrying(
             stop=stop_after_attempt(self._config.max_retries + 1),
@@ -194,6 +186,7 @@ class BaseHttpClient:
                         json_body=json_body,
                         headers=headers,
                         timeout=timeout,
+                        expected_error_codes=expected_error_codes,
                     )
         except (httpx.TransportError, httpx.HTTPStatusError) as exc:
             if _is_retryable(exc):
@@ -214,120 +207,29 @@ class BaseHttpClient:
         params: Mapping[str, Any] | None = None,
         json_body: Any = None,
         timeout: float | None = None,
+        expected_error_codes: frozenset[int] = frozenset(),
     ) -> httpx.Response:
-        """JSON request with dynamic auth and 401-triggered refresh."""
-        headers = dict(await self._headers_provider())
-        try:
-            return await self._request_with_retry(
-                method,
-                path,
-                params=params,
-                json_body=json_body,
-                headers=headers,
-                timeout=timeout,
-            )
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code != 401 or self._auth_refresh is None:
-                raise
-            try:
-                await self._auth_refresh()
-            except Exception as refresh_exc:
-                raise RuntimeError(
-                    f"Auth refresh failed during {method} {path}: {refresh_exc}"
-                ) from refresh_exc
-            headers = dict(await self._headers_provider())
-            return await self._request_with_retry(
-                method,
-                path,
-                params=params,
-                json_body=json_body,
-                headers=headers,
-                timeout=timeout,
-            )
+        """JSON request with dynamic auth headers.
 
-    # -- SSE streaming path ---------------------------------------------------
-
-    async def _stream_sse_authed(
-        self,
-        path: str,
-        json_body: Mapping[str, Any],
-        *,
-        timeout: float | None = None,
-        on_event: Callable[[dict[str, Any]], None] | None = None,
-    ) -> list[dict[str, Any]]:
-        """POST + parse a Server-Sent Events response into decoded events.
-
-        Tenacity retry is intentionally skipped — long-lived streams should
-        not be retried mid-flight. The 401-refresh-once hook still applies.
-        ``timeout=None`` falls back to the configured client timeout.
-
-        ``on_event`` is invoked synchronously for each successfully decoded
-        event before it's appended to the returned list — used by callers
-        that need to react to events mid-stream (e.g. extract a classifier
-        id while a long-lived agent run is still emitting).
+        Status codes in ``expected_error_codes`` are returned to the caller
+        without logging or ``raise_for_status``, so callers handling a known
+        non-2xx response (e.g. 404 = "not found yet") don't spam the log.
+        Must not overlap with retryable codes — "expected" is a terminal
+        outcome by definition, so suppressing one would also suppress the
+        retry loop.
         """
-        effective_timeout = timeout if timeout is not None else self._config.timeout
-        headers = dict(await self._headers_provider())
-        try:
-            return await self._sse_send(
-                path, headers, json_body, effective_timeout, on_event=on_event
+        overlap = expected_error_codes & _RETRYABLE_STATUS_CODES
+        if overlap:
+            raise ValueError(
+                f"expected_error_codes overlaps retryable status codes {sorted(overlap)}; "
+                "marking a code as expected would silently disable retries for it"
             )
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code != 401 or self._auth_refresh is None:
-                raise
-            try:
-                await self._auth_refresh()
-            except Exception as refresh_exc:
-                raise RuntimeError(
-                    f"Auth refresh failed during SSE POST {path}: {refresh_exc}"
-                ) from refresh_exc
-            headers = dict(await self._headers_provider())
-            return await self._sse_send(
-                path, headers, json_body, effective_timeout, on_event=on_event
-            )
-
-    async def _sse_send(
-        self,
-        path: str,
-        headers: dict[str, str],
-        json_body: Mapping[str, Any],
-        timeout: float,
-        *,
-        on_event: Callable[[dict[str, Any]], None] | None = None,
-    ) -> list[dict[str, Any]]:
-        events: list[dict[str, Any]] = []
-        async with aconnect_sse(
-            self._http,
-            "POST",
+        return await self._request_with_retry(
+            method,
             path,
-            headers=headers,
-            json=json_body,
+            params=params,
+            json_body=json_body,
+            headers=self._headers_provider(),
             timeout=timeout,
-        ) as event_source:
-            event_source.response.raise_for_status()
-            async for sse in event_source.aiter_sse():
-                if not sse.data:
-                    continue
-                try:
-                    parsed = json.loads(sse.data)
-                except json.JSONDecodeError as exc:
-                    # Don't kill the stream on a single corrupt event;
-                    # log so silent truncation is debuggable.
-                    logger.warning(
-                        f"Dropped malformed SSE event in {self._client_label}",
-                        path=path,
-                        error=str(exc),
-                        sample=sse.data[:200],
-                    )
-                    continue
-                if on_event is not None:
-                    try:
-                        on_event(parsed)
-                    except Exception:
-                        # A buggy callback must not break the stream.
-                        logger.exception(
-                            f"on_event callback raised in {self._client_label}",
-                            path=path,
-                        )
-                events.append(parsed)
-        return events
+            expected_error_codes=expected_error_codes,
+        )
