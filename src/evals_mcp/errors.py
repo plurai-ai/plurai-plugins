@@ -16,15 +16,28 @@ from typing import Any, cast
 import httpx
 
 _LOGIN_PROMPT = (
-    "Ask the user for their Plurai API key and save it with `evals_mcp auth login --key <KEY>`."
+    "Ask the user to paste their Plurai API key, save it via "
+    "`uv run --project ${CLAUDE_PLUGIN_ROOT} python -m evals_mcp auth login --key <KEY>`, "
+    "then retry the failed tool call."
+)
+
+_REVOKED_KEY_PROMPT = (
+    "The key on disk was rejected by the server — it is revoked, expired, or otherwise invalid. "
+    "If you have a Plurai API key from earlier in this conversation, that IS the rejected key — "
+    "do NOT call `auth login` with it. You MUST ask the user (in chat, this turn) to paste a "
+    "freshly-generated key from https://app.plurai.ai/settings?tab=api-keys (Create new key); "
+    "warn them the key will appear in this conversation. Only after the user supplies a new key "
+    "in this turn, run "
+    "`uv run --project ${CLAUDE_PLUGIN_ROOT} python -m evals_mcp auth login --key <NEW_KEY>` "
+    "and retry the failed tool call."
 )
 
 
 class MissingApiKeyError(RuntimeError):
     """Raised when no Plurai API key is configured.
 
-    Surfaced to tool callers so the model can prompt the user to run
-    ``/login`` instead of retrying blindly.
+    Surfaced to tool callers so the model runs the inline auth flow
+    instead of bouncing the prompt back to the user.
     """
 
     def __init__(self) -> None:
@@ -41,11 +54,7 @@ class CorruptCredentialsError(RuntimeError):
 
     def __init__(self, path: Path, reason: str) -> None:
         self.path = path
-        super().__init__(
-            f"Credentials file at {path} is unreadable: {reason}. "
-            "Ask the user for a fresh key and re-run "
-            "`evals_mcp auth login --key <KEY>` to overwrite it."
-        )
+        super().__init__(f"Credentials file at {path} is unreadable: {reason}. {_LOGIN_PROMPT}")
 
 
 _ERROR_BODY_MAX_BYTES = 2000
@@ -102,9 +111,15 @@ def format_tool_error(exc: BaseException) -> dict[str, str]:
     if isinstance(exc, CorruptCredentialsError):
         return {"error": str(exc)}
     if isinstance(exc, httpx.HTTPStatusError):
-        if exc.response.status_code == 401:
-            return {"error": f"Plurai API key invalid or expired. {_LOGIN_PROMPT}"}
-        return {"error": f"HTTP {exc.response.status_code}: {safe_error_body(exc)}"}
+        # langgraph_sdk's APIConnectionError / APITimeoutError extend
+        # HTTPStatusError but pass response=None — treat them as transport
+        # errors rather than dereferencing the missing response.
+        response = cast("httpx.Response | None", exc.response)
+        if response is None:
+            return {"error": f"Network error reaching Plurai: {exc}"}
+        if response.status_code == 401:
+            return {"error": f"Plurai API key invalid or expired. {_REVOKED_KEY_PROMPT}"}
+        return {"error": f"HTTP {response.status_code}: {safe_error_body(exc)}"}
     if isinstance(exc, httpx.TransportError):
         return {"error": f"Network error reaching Plurai: {exc}"}
     if isinstance(exc, RuntimeError):

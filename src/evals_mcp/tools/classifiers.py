@@ -187,7 +187,7 @@ async def _search_evaluators(args: SearchEvaluatorsArgs, ctx: Context[Any, Any, 
                 "description": (c.description or "")[:200],
                 "slug": slug,
                 "labels": _labels_of(c),
-                "endpoint_url": f"{settings.run_url}/ioa/v1/{slug}/{version}",
+                "endpoint_url": f"{settings.run_base}/ioa/v1/{slug}/{version}",
                 "has_optimization": has_opt,
                 "created_at": c.created_at,
             }
@@ -244,7 +244,7 @@ async def _get_results(args: GetResultsArgs, ctx: Context[Any, Any, Any]) -> Any
         "classifier_id": classifier_id,
         "slug": slug,
         "version": version,
-        "endpoint_url": f"{settings.run_url}/ioa/v1/{slug}/{version}",
+        "endpoint_url": f"{settings.run_base}/ioa/v1/{slug}/{version}",
         "baseline": baseline.model_dump(),
         "optimized": optimized.model_dump(),
     }

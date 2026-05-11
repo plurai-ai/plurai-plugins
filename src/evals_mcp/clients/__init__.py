@@ -1,14 +1,8 @@
-"""Typed HTTP clients for the Plurai REST API and CopilotKit agent endpoint."""
+"""Typed HTTP clients for the Plurai REST API and the agent endpoint."""
 
-from .agent import AgentClient
-from .base import (
-    AuthRefresh,
-    BaseHttpClient,
-    BaseHttpClientConfig,
-    HeadersProvider,
-)
+from .agent import AgentClient, ThreadStateView
+from .base import BaseHttpClient, BaseHttpClientConfig, HeadersProvider
 from .models import (
-    AgentEvent,
     ClassifierDefaultVersionView,
     ClassifierSummaryView,
     CreateApiKeyResponse,
@@ -25,8 +19,6 @@ from .platform import PlatformClient
 
 __all__ = [
     "AgentClient",
-    "AgentEvent",
-    "AuthRefresh",
     "BaseHttpClient",
     "BaseHttpClientConfig",
     "ClassifierDefaultVersionView",
@@ -41,5 +33,6 @@ __all__ = [
     "MetricsView",
     "OptimizationView",
     "PlatformClient",
+    "ThreadStateView",
     "ThreadView",
 ]

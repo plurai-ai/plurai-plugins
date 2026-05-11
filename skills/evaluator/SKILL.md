@@ -10,7 +10,10 @@ description: >
 
 The user wants to build an LLM-as-a-judge evaluator. Use the Plurai platform MCP tools (the `evals` plugin).
 
-If any `evals_*` tool fails with `Plurai API key not set.` or `Plurai API key invalid or expired.`, ask the user to run `/login` and stop until they do.
+**Auth.** Handle the two error variants differently.
+
+- **`Plurai API key not set`** (no key configured): ask the user to paste their Plurai API key — if they don't have one, point them to https://app.plurai.ai/settings?tab=api-keys → **Create new key** (warn the key will appear in this conversation). Then run `uv run --project ${CLAUDE_PLUGIN_ROOT} python -m evals_mcp auth login --key <KEY>` and retry.
+- **`Plurai API key invalid or expired`** (server returned 401, on-disk key rejected): if you have a key from earlier in this conversation, that IS the rejected key — do NOT call `auth login` with it. You MUST ask the user (in chat, this turn) to paste a NEW, freshly-generated key from https://app.plurai.ai/settings?tab=api-keys → **Create new key** (warn the key will appear in this conversation). Only after the user supplies a new key in this turn, run `uv run --project ${CLAUDE_PLUGIN_ROOT} python -m evals_mcp auth login --key <NEW_KEY>` and retry. Never silently auto-renew with a remembered key.
 
 Call `evals_search_evaluators` first as an optimization to see whether the user already has an evaluator in their Plurai workspace that fits this task. **If the list is empty, say nothing about it and proceed silently to create a new one** — a new user has no evaluators yet and should not be told something is missing. If one or more existing evaluators match, surface the full list to the user and use `evals_ask_user` to ask whether to reuse one or create a new one. If reusing, provide the endpoint URL and API key.
 

@@ -14,7 +14,7 @@ dependencies = [
   "pydantic-settings>=2.2",
   "structlog>=24.1",
   "tenacity>=8.2",
-  "httpx-sse>=0.4",
+  "langgraph-sdk==0.3.1",
 ]
 
 [project.scripts]

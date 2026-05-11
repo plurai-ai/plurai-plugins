@@ -10,9 +10,9 @@ the env var before the first `get_settings()` call.
 
 from __future__ import annotations
 
-from functools import cached_property, lru_cache
+from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .clients import BaseHttpClientConfig
@@ -25,11 +25,11 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    api_base: str = "https://app.plurai.ai"
-    run_base: str | None = None
+    api_base: str = Field(default="https://app.plurai.ai", min_length=1)
+    run_base: str = Field(default="https://run.plurai.ai", min_length=1)
 
-    # Where the user's API key is persisted by `/login`. Resolved with
-    # ``Path.expanduser()`` at use-site, so ``~`` works.
+    # Where the user's API key is persisted by the `auth login` CLI.
+    # Resolved with ``Path.expanduser()`` at use-site, so ``~`` works.
     credentials_path: str = "~/.config/evals/credentials.json"
 
     # Where structured server logs are written. Claude Code discards stderr
@@ -42,48 +42,38 @@ class Settings(BaseSettings):
     http_max_retries: int = Field(default=3, ge=0)
     http_backoff_base: float = Field(default=1.0, gt=0)
     http_backoff_max: float = Field(default=30.0, gt=0)
-    # Agent (CopilotKit SSE) timeout is separate: streams legitimately run
-    # for minutes, so the JSON-request default (30s) is too short.
     agent_http_timeout: float = Field(default=300.0, gt=0)
+    langgraph_assistant_id: str = "calibration_agent"
+    classifier_wait_timeout_s: float = Field(default=120.0, gt=0)
 
-    @cached_property
-    def platform_api(self) -> str:
-        return f"{self.api_base}/api/pluto"
+    # When unset (the default), filled by ``_derive_urls`` from ``api_base``.
+    platform_api: str = ""
+    langgraph_url: str = ""
 
-    @cached_property
-    def agent_api_base(self) -> str:
-        """Base URL for the CopilotKit agent endpoint (no trailing path).
+    _DEFAULT_LANGGRAPH_URL = "https://api.plurai.ai/pluto/agent/langgraph"
 
-        Used as ``base_url`` for ``AgentClient``'s underlying httpx client;
-        the request path (``/copilotkit``) is owned by ``AgentClient`` itself.
-        """
-        return f"{self.api_base}/api/agent/api"
-
-    @cached_property
-    def run_url(self) -> str:
-        if self.run_base:
-            return self.run_base.rstrip("/")
-        # Mirror prod ↔ staging based on the API host.
-        if "stg" in self.api_base:
-            return "https://run.stg.plurai.ai"
-        return "https://run.plurai.ai"
+    @model_validator(mode="after")
+    def _derive_urls(self) -> Settings:
+        self.api_base = self.api_base.rstrip("/")
+        self.run_base = self.run_base.rstrip("/")
+        if not self.platform_api:
+            self.platform_api = f"{self.api_base}/api/pluto"
+        if not self.langgraph_url:
+            self.langgraph_url = self._DEFAULT_LANGGRAPH_URL
+        # Normalize after both derivation and explicit-override paths so an
+        # ``EVALS_LANGGRAPH_URL`` with a trailing slash doesn't produce
+        # double-slash URLs downstream.
+        self.platform_api = self.platform_api.rstrip("/")
+        self.langgraph_url = self.langgraph_url.rstrip("/")
+        if not self.platform_api or not self.langgraph_url:
+            raise ValueError("platform_api / langgraph_url cannot be empty after derivation")
+        return self
 
     def platform_client_config(self) -> BaseHttpClientConfig:
         return BaseHttpClientConfig(
             api_url=self.platform_api,
             timeout=self.http_timeout,
             max_retries=self.http_max_retries,
-            backoff_base=self.http_backoff_base,
-            backoff_max=self.http_backoff_max,
-        )
-
-    def agent_client_config(self) -> BaseHttpClientConfig:
-        # SSE: tenacity retry is skipped at the streaming layer anyway, but
-        # keep transient retries off for the underlying httpx client too.
-        return BaseHttpClientConfig(
-            api_url=self.agent_api_base,
-            timeout=self.agent_http_timeout,
-            max_retries=0,
             backoff_base=self.http_backoff_base,
             backoff_max=self.http_backoff_max,
         )

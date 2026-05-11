@@ -7,5 +7,14 @@
         "url": "https://plurai.ai"
     },
     "homepage": "https://plurai.ai",
-    "keywords": ["evaluation", "llm-as-a-judge", "fine-tuning", "classifier"]
+    "keywords": ["evaluation", "llm-as-a-judge", "fine-tuning", "classifier"],
+    "mcpServers": {
+        "evals": {
+            "command": "uv",
+            "args": [
+                "run", "--project", "${CLAUDE_PLUGIN_ROOT}",
+                "python", "-m", "evals_mcp"
+            ]
+        }
+    }
 }

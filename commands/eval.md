@@ -4,11 +4,17 @@ argument-hint: "[task description or --data file.csv]"
 allowed-tools: ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Agent"]
 ---
 
-**Auth.** If any evals MCP tool returns an error containing `Plurai API key not set` or `Plurai API key invalid or expired`, do **not** tell the user to run `/login`. Handle it inline:
+**Auth.** Two distinct cases — handle them differently.
+
+**Case A — `Plurai API key not set`** (no key configured yet, e.g. fresh install or after `auth logout`):
 
 1. Ask the user (in chat) to paste their Plurai API key. If they don't have one, point them to https://app.plurai.ai/settings?tab=api-keys → **Create new key**. Warn that the key will appear in this conversation.
 2. Run `uv run --project ${CLAUDE_PLUGIN_ROOT} python -m evals_mcp auth login --key <KEY>` with the pasted key.
-3. On success (`Saved API key to <path>.`), retry the failed tool call and continue with the eval flow. On failure, relay the stderr message to the user.
+3. On success (`Saved API key to <path>.`), retry the failed tool call. On failure, relay the stderr message to the user.
+
+**Case B — `Plurai API key invalid or expired`** (server returned 401: the on-disk key was rejected):
+
+The key currently on disk is bad. If you have a key from earlier in this conversation, that IS the rejected key — do NOT call `auth login` with it. You MUST ask the user (in chat, this turn) to paste a NEW, freshly-generated key from https://app.plurai.ai/settings?tab=api-keys → **Create new key**. Warn the key will appear in this conversation. Only after the user supplies a new key in this turn, run `uv run --project ${CLAUDE_PLUGIN_ROOT} python -m evals_mcp auth login --key <NEW_KEY>` and retry. Never silently auto-renew with a remembered key — the user must see the prompt and supply a fresh key.
 
 Call `evals_search_evaluators` first as an optimization to check whether the user already has an evaluator in their Plurai workspace that fits this task. **If the list is empty, say nothing about it and proceed silently to create a new one** — a fresh user has no evaluators yet and should not be told something is missing. If one or more existing evaluators match, surface the full list to the user and use `evals_ask_user` to ask whether to reuse one or create a new one. If reusing, skip to providing the endpoint URL and API key.
 
