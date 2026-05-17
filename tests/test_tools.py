@@ -526,8 +526,11 @@ async def test_start_evaluator_happy_path(
     )
     assert out["thread_id"] == "thread-1"
     assert out["example_set_id"] == "es-1"
-    assert out["action_required"] == "PRESENT_QUESTIONS_TO_USER"
+    assert "action_required" not in out
     assert out["agent_response"] == "What labels?"
+    assert "platform_constraint" in out
+    assert "FROZEN" in out["platform_constraint"]
+    assert "evals_start_evaluator" in out["platform_constraint"]
     assert ctx.request_context.lifespan_context.has_questions is True
 
 
@@ -652,6 +655,12 @@ async def test_send_message_surfaces_url_when_commit_id_present(
     assert "SLM" in instructions and "LLM" in instructions
     assert "Ready to optimize" not in instructions
     assert "review-confirm" not in instructions.lower()
+    # Frozen-task constraint must be surfaced post-commit, so a user who asks
+    # to "change the task" after seeing samples gets a restart, not a silent
+    # sample-only edit.
+    assert "platform_constraint" in out
+    assert "FROZEN" in out["platform_constraint"]
+    assert "evals_start_evaluator" in out["platform_constraint"]
     assert state.committed is True
     # Re-armed so the next ask_user (optimization choice) is allowed through.
     assert state.has_questions is True
@@ -678,6 +687,13 @@ async def test_send_message_no_url_when_no_commit_id(
 
     out = await _send_message(SendMessageArgs(thread_id="thread-1", message="more context"), ctx)
     assert "url" not in out
+    # Frozen-task constraint is only meaningful post-commit; the refinement
+    # branch must not leak it.
+    assert "platform_constraint" not in out
+    # Pre-commit branch now carries WHO-answers guidance — pin the contract
+    # by name (evals_ask_user) without freezing the wording.
+    assert "instructions" in out
+    assert "evals_ask_user" in out["instructions"]
     assert state.committed is False
     # Refinement question detected → has_questions re-armed via the '?' branch.
     assert state.has_questions is True

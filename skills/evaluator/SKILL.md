@@ -19,11 +19,18 @@ Call `evals_search_evaluators` first as an optimization to see whether the user 
 
 If creating new, call `evals_start_evaluator`. For `task_description`: 1-2 short sentences. Include task + desired label names.
 
+**Platform constraint — the task definition is frozen.** The `task_description` passed to `evals_start_evaluator` is permanent for that evaluator. Subsequent `evals_send_message` calls only refine the *generated samples* (add/remove/edit examples), never the task itself (labels, judging criteria, scope). If at any point — including after the user sees the samples — they want to change the task, you MUST tell them the task can't be edited, confirm they want to restart, then call `evals_start_evaluator` again with a revised `task_description`. Do NOT try to amend the task via `evals_send_message`; it will silently leave the underlying task wrong while mutating samples.
+
 **Input template**: If evaluation involves multiple fields (context + response, conversation turns, etc.), specify the template in the task description. The evaluator receives ONE text input — all fields must be in a single message. E.g. "Input format: '## Context:\n{context}\n\n## Response:\n{response}'"
 
 If the user provides a labeled data file, after `evals_start_evaluator` call `evals_upload_data` with the parsed records and `example_set_id`. Continue with `evals_ask_user` using the refinement questions from the start_evaluator response.
 
-Then follow the `instructions` field in the response — it tells you to call `evals_ask_user`.
+**Who answers the refinement questions.** Decide from how the user framed the request:
+
+- **User defined the task** (supplied concrete label names, judging rules, or a labeled dataset; or invoked `/eval` with a detailed prompt): present the agent's refinement questions to the user by calling `evals_ask_user` with them rephrased as options.
+- **User delegated task definition** (e.g. "generate evals for my <X> agent" without spelling out criteria, or you were invoked from another skill such as `plurai-simulation:generate-evals`): answer the refinement questions yourself using the agent codebase context and call `evals_send_message` with your composed answers. Do NOT bounce questions back to a user who has no context to answer them.
+
+When in doubt, prefer answering yourself. Reserve `evals_ask_user` for genuinely user-only choices: reuse-vs-create when there's a search match, model choice (SLM vs LLM), and integration-snippet language.
 
 **Surfacing progress to the user.** After every `evals_send_message`, show the user the `agent_response` text verbatim so they see what the platform is doing (e.g. "I've generated 16 synthetic examples..."). Whenever a response includes `url`, you MUST display it to the user as a clickable markdown link in that turn — never silently move on.
 
