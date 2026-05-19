@@ -22,7 +22,7 @@ If creating new, call `evals_start_evaluator`.
 
 For `task_description`: 1-2 short sentences. Include the core task and desired label names if the user mentioned them. Do NOT include examples, detailed criteria, or long explanations.
 
-**Platform constraint — the task definition is frozen.** The `task_description` passed to `evals_start_evaluator` is permanent for that evaluator. Subsequent `evals_send_message` calls only refine the *generated samples* (add/remove/edit examples), never the task itself (labels, judging criteria, scope). If at any point — including after the user sees the samples — they want to change the task, you MUST tell them the task can't be edited, confirm they want to restart, then call `evals_start_evaluator` again with a revised `task_description`. Do NOT try to amend the task via `evals_send_message`; it will silently leave the underlying task wrong while mutating samples.
+**Platform constraint — the task definition is frozen.** The `task_description` passed to `evals_start_evaluator` is permanent for that evaluator. Subsequent `evals_send_message` calls only refine the *generated samples* (add/remove/edit examples), never the task itself (judging criteria, scope). Labels CAN still be changed within the same task. If at any point — including after the user sees the samples — they want to change the underlying task, you MUST tell them the task can't be edited, confirm they want to restart, then call `evals_start_evaluator` again with a revised `task_description`. Do NOT try to amend the task via `evals_send_message`; it will silently leave the underlying task wrong while mutating samples.
 
 **Important — input template**: If the evaluation involves multiple fields (e.g. context + response for grounding, or a conversation), you MUST specify the input template explicitly in the task description. The evaluator receives a SINGLE text input, so all fields must be combined into one message using a clear template. Examples:
 
@@ -35,7 +35,7 @@ For `task_description`: 1-2 short sentences. Include the core task and desired l
 **Who answers the refinement questions.** Decide from how the user framed the request:
 
 - **User defined the task** (supplied concrete label names, judging rules, or a labeled dataset; or invoked `/eval` with a detailed prompt): present the agent's refinement questions to the user by calling `evals_ask_user` with them rephrased as options.
-- **User delegated task definition** (e.g. "generate evals for my <X> agent" without spelling out criteria, or you were invoked from another skill such as `plurai-simulation:generate-evals`): answer the refinement questions yourself using the agent codebase context and call `evals_send_message` with your composed answers. Do NOT bounce questions back to a user who has no context to answer them.
+- **User delegated task definition** (e.g. "generate evals for my <X> agent" without spelling out criteria, or you were invoked from another skill): answer the refinement questions yourself using the agent codebase context and call `evals_send_message` with your composed answers. Do NOT bounce questions back to a user who has no context to answer them.
 
 When in doubt, prefer answering yourself. Reserve `evals_ask_user` for genuinely user-only choices: reuse-vs-create when there's a search match, model choice (SLM vs LLM), and integration-snippet language.
 

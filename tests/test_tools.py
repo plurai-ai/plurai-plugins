@@ -520,6 +520,11 @@ async def test_start_evaluator_happy_path(
         }
     )
 
+    # Seed leftover state from a prior evaluator on the same server — the
+    # post-commit branch of _send_message keys off this flag, so a leaked
+    # True would mis-route the first follow-up of the new evaluator.
+    ctx.request_context.lifespan_context.committed = True
+
     out = await _start_evaluator(
         StartEvaluatorArgs(task_description="Classify outputs as safe or unsafe"),
         ctx,
@@ -532,6 +537,7 @@ async def test_start_evaluator_happy_path(
     assert "FROZEN" in out["platform_constraint"]
     assert "evals_start_evaluator" in out["platform_constraint"]
     assert ctx.request_context.lifespan_context.has_questions is True
+    assert ctx.request_context.lifespan_context.committed is False
 
 
 # ── ask_user: gating + decline-fallback ──────────────────────────────────

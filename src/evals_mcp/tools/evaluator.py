@@ -214,6 +214,10 @@ async def _start_evaluator(args: StartEvaluatorArgs, ctx: Context[Any, Any, Any]
     snapshot = await state.agent.get_state(thread.id)
     agent_response = snapshot.last_assistant_message()
     state.has_questions = True
+    # Reset persistent state — a prior evaluator on this server may have
+    # committed, and the leaked True would mis-route the post-commit branch
+    # of _send_message on the very first follow-up.
+    state.committed = False
 
     return {
         "thread_id": thread.id,
@@ -223,8 +227,8 @@ async def _start_evaluator(args: StartEvaluatorArgs, ctx: Context[Any, Any, Any]
         "platform_constraint": (
             "TASK DEFINITION IS FROZEN. The task_description passed here is "
             "permanent for this evaluator — subsequent evals_send_message calls "
-            "only refine the generated samples, never the task itself (labels, "
-            "judging criteria, scope). If the user later wants to change the "
+            "only refine the generated samples, never the task itself "
+            "(judging criteria, scope). If the user later wants to change the "
             "task, you MUST start a fresh evaluator by calling "
             "evals_start_evaluator again with a revised task_description. "
             "Never try to amend the task via evals_send_message."
@@ -309,7 +313,7 @@ async def _send_message(args: SendMessageArgs, ctx: Context[Any, Any, Any]) -> d
         )
         result["platform_constraint"] = (
             "TASK DEFINITION IS FROZEN. If the user reacts to the samples by "
-            "asking to change labels, judging criteria, or task scope, do NOT "
+            "asking to change the judging criteria or task scope, do NOT "
             "send that as a chat message — evals_send_message can only refine "
             "samples, not the task. Tell the user the task can't be edited, "
             "confirm they want to restart, then call evals_start_evaluator "
