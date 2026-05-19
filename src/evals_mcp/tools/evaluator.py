@@ -214,17 +214,41 @@ async def _start_evaluator(args: StartEvaluatorArgs, ctx: Context[Any, Any, Any]
     snapshot = await state.agent.get_state(thread.id)
     agent_response = snapshot.last_assistant_message()
     state.has_questions = True
+    # Reset persistent state — a prior evaluator on this server may have
+    # committed, and the leaked True would mis-route the post-commit branch
+    # of _send_message on the very first follow-up.
+    state.committed = False
 
     return {
         "thread_id": thread.id,
         "example_set_id": thread.example_set_id,
         "url": f"{settings.api_base.rstrip('/')}/thread/{thread.id}",
         "agent_response": agent_response,
-        "action_required": "PRESENT_QUESTIONS_TO_USER",
+        "platform_constraint": (
+            "TASK DEFINITION IS FROZEN. The task_description passed here is "
+            "permanent for this evaluator — subsequent evals_send_message calls "
+            "only refine the generated samples, never the task itself "
+            "(judging criteria, scope). If the user later wants to change the "
+            "task, you MUST start a fresh evaluator by calling "
+            "evals_start_evaluator again with a revised task_description. "
+            "Never try to amend the task via evals_send_message."
+        ),
         "instructions": (
-            "The agent returned refinement questions. "
-            "Call evals_ask_user with the questions rephrased as options. "
-            "Do NOT present the questions as text."
+            "The agent returned refinement questions in agent_response. "
+            "First decide WHO answers them: "
+            "(a) If the user defined the task with concrete criteria — e.g. they "
+            "supplied label names, judging rules, or a labeled dataset — present "
+            "the questions to the user by calling evals_ask_user with them "
+            "rephrased as options. "
+            "(b) If the user DELEGATED task definition — e.g. 'generate evals for "
+            "my <X> agent' without spelling out criteria, or you were invoked "
+            "from another skill — answer the questions yourself using the agent "
+            "codebase context and call evals_send_message with your composed "
+            "answers. Do NOT bounce questions back to a user who has no context "
+            "to answer them. "
+            "When in doubt, prefer answering yourself. Reserve evals_ask_user "
+            "for genuinely user-only choices (reuse-vs-create, SLM-vs-LLM, "
+            "integration language)."
         ),
     }
 
@@ -286,6 +310,28 @@ async def _send_message(args: SendMessageArgs, ctx: Context[Any, Any, Any]) -> d
             'and quick validations. ~2 min.". '
             "Do NOT add an explicit Other option, and do NOT add any extra "
             "confirmation question before this ask."
+        )
+        result["platform_constraint"] = (
+            "TASK DEFINITION IS FROZEN. If the user reacts to the samples by "
+            "asking to change the judging criteria or task scope, do NOT "
+            "send that as a chat message — evals_send_message can only refine "
+            "samples, not the task. Tell the user the task can't be edited, "
+            "confirm they want to restart, then call evals_start_evaluator "
+            "with a revised task_description. For sample edits "
+            "(add/remove/modify individual examples), prefer the UI experience "
+            "link surfaced above; only edit via evals_send_message if the user "
+            "explicitly asks to do it through chat."
+        )
+    else:
+        result["instructions"] = (
+            "If agent_response contains a refinement question, apply the "
+            "WHO-answers rule from evals_start_evaluator: if the user delegated "
+            "task definition, answer yourself via evals_send_message from the "
+            "agent codebase context; otherwise call evals_ask_user. When in "
+            "doubt, answer yourself — do NOT bounce questions back to a user "
+            "who has no context. If agent_response is a status message (e.g. "
+            "'Generating examples...'), just surface it verbatim and wait — "
+            "no follow-up tool call is required."
         )
     return result
 

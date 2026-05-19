@@ -8,19 +8,21 @@ allowed-tools: ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Agent"]
 
 **Case A — `Plurai API key not set`** (no key configured yet, e.g. fresh install or after `auth logout`):
 
-1. Ask the user (in chat) to paste their Plurai API key. If they don't have one, point them to https://app.plurai.ai/settings?tab=api-keys → **Create new key**. Warn that the key will appear in this conversation.
+1. Ask the user (in chat) to paste their Plurai API key. If they don't have one, point them to https://app.plurai.ai/settings?tab=api-keys → **Create new key**.
 2. Run `uv run --project ${CLAUDE_PLUGIN_ROOT} python -m evals_mcp auth login --key <KEY>` with the pasted key.
 3. On success (`Saved API key to <path>.`), retry the failed tool call. On failure, relay the stderr message to the user.
 
 **Case B — `Plurai API key invalid or expired`** (server returned 401: the on-disk key was rejected):
 
-The key currently on disk is bad. If you have a key from earlier in this conversation, that IS the rejected key — do NOT call `auth login` with it. You MUST ask the user (in chat, this turn) to paste a NEW, freshly-generated key from https://app.plurai.ai/settings?tab=api-keys → **Create new key**. Warn the key will appear in this conversation. Only after the user supplies a new key in this turn, run `uv run --project ${CLAUDE_PLUGIN_ROOT} python -m evals_mcp auth login --key <NEW_KEY>` and retry. Never silently auto-renew with a remembered key — the user must see the prompt and supply a fresh key.
+The key currently on disk is bad. If you have a key from earlier in this conversation, that IS the rejected key — do NOT call `auth login` with it. You MUST ask the user (in chat, this turn) to paste a NEW, freshly-generated key from https://app.plurai.ai/settings?tab=api-keys → **Create new key**. Only after the user supplies a new key in this turn, run `uv run --project ${CLAUDE_PLUGIN_ROOT} python -m evals_mcp auth login --key <NEW_KEY>` and retry. Never silently auto-renew with a remembered key — the user must see the prompt and supply a fresh key.
 
 Call `evals_search_evaluators` first as an optimization to check whether the user already has an evaluator in their Plurai workspace that fits this task. **If the list is empty, say nothing about it and proceed silently to create a new one** — a fresh user has no evaluators yet and should not be told something is missing. If one or more existing evaluators match, surface the full list to the user and use `evals_ask_user` to ask whether to reuse one or create a new one. If reusing, skip to providing the endpoint URL and API key.
 
 If creating new, call `evals_start_evaluator`.
 
 For `task_description`: 1-2 short sentences. Include the core task and desired label names if the user mentioned them. Do NOT include examples, detailed criteria, or long explanations.
+
+**Platform constraint — the task definition is frozen.** The `task_description` passed to `evals_start_evaluator` is permanent for that evaluator. Subsequent `evals_send_message` calls only refine the *generated samples* (add/remove/edit examples), never the task itself (judging criteria, scope). Labels CAN still be changed within the same task. If at any point — including after the user sees the samples — they want to change the underlying task, you MUST tell them the task can't be edited, confirm they want to restart, then call `evals_start_evaluator` again with a revised `task_description`. Do NOT try to amend the task via `evals_send_message`; it will silently leave the underlying task wrong while mutating samples.
 
 **Important — input template**: If the evaluation involves multiple fields (e.g. context + response for grounding, or a conversation), you MUST specify the input template explicitly in the task description. The evaluator receives a SINGLE text input, so all fields must be combined into one message using a clear template. Examples:
 
@@ -30,7 +32,12 @@ For `task_description`: 1-2 short sentences. Include the core task and desired l
 
 **Data path — if the user supplied a labeled data file** (e.g. `/eval --data path/to/file.csv` or they pasted a path): after `evals_start_evaluator`, read the file, parse it into `{sample, label, reasoning?}` records, then call `evals_upload_data` with the `example_set_id` from the start_evaluator response. Do NOT synthesize records. Continue with `evals_ask_user` using the refinement questions from the start_evaluator `agent_response`.
 
-Then follow the `instructions` field in the response — it tells you to call `evals_ask_user`.
+**Who answers the refinement questions.** Decide from how the user framed the request:
+
+- **User defined the task** (supplied concrete label names, judging rules, or a labeled dataset; or invoked `/eval` with a detailed prompt): present the agent's refinement questions to the user by calling `evals_ask_user` with them rephrased as options.
+- **User delegated task definition** (e.g. "generate evals for my <X> agent" without spelling out criteria, or you were invoked from another skill): answer the refinement questions yourself using the agent codebase context and call `evals_send_message` with your composed answers. Do NOT bounce questions back to a user who has no context to answer them.
+
+When in doubt, prefer answering yourself. Reserve `evals_ask_user` for genuinely user-only choices: reuse-vs-create when there's a search match, model choice (SLM vs LLM), and integration-snippet language.
 
 **Surfacing progress to the user.** After every `evals_send_message`, show the user the `agent_response` text verbatim so they see what the platform is doing (e.g. "I've generated 16 synthetic examples..."). Whenever a response includes `url`, you MUST display it to the user as a clickable markdown link in that turn — never silently move on.
 
