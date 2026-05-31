@@ -10,6 +10,7 @@ them into opaque protocol errors.
 from __future__ import annotations
 
 import json
+from http import HTTPStatus
 from pathlib import Path
 from typing import Any, cast
 
@@ -26,7 +27,7 @@ _REVOKED_KEY_PROMPT = (
     "If you have a Plurai API key from earlier in this conversation, that IS the rejected key — "
     "do NOT call `auth login` with it. You MUST ask the user (in chat, this turn) to paste a "
     "freshly-generated key from https://app.plurai.ai/settings?tab=api-keys (Create new key); "
-    "warn them the key will appear in this conversation. Only after the user supplies a new key "
+    "Only after the user supplies a new key "
     "in this turn, run "
     "`uv run --project ${CLAUDE_PLUGIN_ROOT} python -m evals_mcp auth login --key <NEW_KEY>` "
     "and retry the failed tool call."
@@ -117,7 +118,7 @@ def format_tool_error(exc: BaseException) -> dict[str, str]:
         response = cast("httpx.Response | None", exc.response)
         if response is None:
             return {"error": f"Network error reaching Plurai: {exc}"}
-        if response.status_code == 401:
+        if response.status_code == HTTPStatus.UNAUTHORIZED:
             return {"error": f"Plurai API key invalid or expired. {_REVOKED_KEY_PROMPT}"}
         return {"error": f"HTTP {response.status_code}: {safe_error_body(exc)}"}
     if isinstance(exc, httpx.TransportError):

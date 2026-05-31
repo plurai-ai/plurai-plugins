@@ -28,6 +28,13 @@ class ServerState:
     agent: AgentClient
     has_questions: bool = False
     committed: bool = False
+    # Whether the current evaluator's org may run SLM optimization. Set
+    # in _send_message at commit time from `GET /plan`, then consumed by
+    # _handle_optimize as the backstop that rejects `Optimize [SLM]` if
+    # the orchestrator surfaces it despite the gated UX. Defaults to True
+    # — the backstop is only meaningful after the post-commit plan check,
+    # and an `Optimize [SLM]` arriving before commit isn't a real concern.
+    slm_allowed: bool = True
     # Holds references to background optimize tasks so asyncio doesn't GC
     # them mid-flight. The set is cleaned up by the task's own done callback.
     background_tasks: set[asyncio.Task[None]] = field(default_factory=lambda: set())

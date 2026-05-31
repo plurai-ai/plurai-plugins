@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from http import HTTPStatus
 from typing import Annotated, Any, cast
 
 import httpx
@@ -13,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..clients import GetClassifierResponse, ThreadStateView
 from ..config import Settings, get_settings
-from ..errors import format_tool_error
+from ..errors import CorruptCredentialsError, MissingApiKeyError, format_tool_error
 from ..state import ServerState
 
 logger: Any = structlog.get_logger(__name__)
@@ -50,8 +51,12 @@ class SendMessageArgs(BaseModel):
 class AskUserOption(BaseModel):
     model_config = _StrictModel
     label: Annotated[str, Field(min_length=1, description="Display text for the option.")]
-    value: Annotated[
-        str, Field(min_length=1, description="Value returned when this option is selected.")
+    description: Annotated[
+        str,
+        Field(
+            min_length=1,
+            description="Explanation of what this option means or what happens if chosen.",
+        ),
     ]
 
 
@@ -60,7 +65,14 @@ class AskUserQuestion(BaseModel):
     question: Annotated[str, Field(min_length=1, description="The question text.")]
     options: Annotated[
         list[AskUserOption],
-        Field(description="Selectable options for this question."),
+        Field(
+            min_length=2,
+            max_length=4,
+            description=(
+                "Selectable options for this question (2-4). If only one viable "
+                "option remains, do NOT call this tool — proceed directly instead."
+            ),
+        ),
     ]
 
 
@@ -77,6 +89,32 @@ class AskUserArgs(BaseModel):
 
 def _state_of(ctx: Context[Any, Any, Any]) -> ServerState:
     return cast(ServerState, ctx.request_context.lifespan_context)
+
+
+async def _check_slm_entitlement(state: ServerState) -> bool:
+    """Return whether the authenticated org may run SLM optimization.
+
+    Fails closed: any non-auth error from ``GET /plan`` (network, 5xx,
+    validation) is logged at warning level and treated as "no entitlement".
+    Auth errors (missing/corrupt credentials or HTTP 401) propagate so the
+    existing inline auth flow can fire.
+    """
+    try:
+        plan = await state.platform.get_plan()
+    except (MissingApiKeyError, CorruptCredentialsError):
+        raise
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == HTTPStatus.UNAUTHORIZED:
+            raise
+        logger.warning(
+            "Plan fetch failed; failing closed on SLM entitlement",
+            status_code=e.response.status_code,
+        )
+        return False
+    except (httpx.TransportError, ValidationError, RuntimeError) as e:
+        logger.warning("Plan fetch failed; failing closed on SLM entitlement", error=str(e))
+        return False
+    return plan.entitlements.slm_endpoints
 
 
 async def _start_optimize_and_await_classifier(
@@ -167,7 +205,20 @@ async def _handle_optimize(
     If classifier_id doesn't surface within ``classifier_wait_timeout_s``
     (rare), raise ``RuntimeError`` so the orchestrator gets a clean error
     envelope and can retry from scratch — never guess an ID.
+
+    Backstop: if the org lacks SLM entitlement (``state.slm_allowed`` set
+    to False by the prior commit-time plan check), reject ``Optimize [SLM]``
+    before starting the background run. The gated UX in ``_send_message``
+    already omits the SLM option, but this defends against orchestrator drift.
     """
+    if message.strip().lower() == "optimize [slm]" and not state.slm_allowed:
+        return {
+            "error": (
+                "SLM optimization requires a paid Plurai plan. Upgrade at "
+                f"{settings.api_base.rstrip('/')}/settings?tab=subscription-billing, "
+                "then retry. To run now, send 'Optimize [LLM]' instead."
+            )
+        }
     classifier_id = await _start_optimize_and_await_classifier(
         state, thread_id, message, settings.classifier_wait_timeout_s
     )
@@ -218,6 +269,7 @@ async def _start_evaluator(args: StartEvaluatorArgs, ctx: Context[Any, Any, Any]
     # committed, and the leaked True would mis-route the post-commit branch
     # of _send_message on the very first follow-up.
     state.committed = False
+    state.slm_allowed = True
 
     return {
         "thread_id": thread.id,
@@ -288,28 +340,18 @@ async def _send_message(args: SendMessageArgs, ctx: Context[Any, Any, Any]) -> d
     state.has_questions = True
 
     if state.committed:
+        state.slm_allowed = await _check_slm_entitlement(state)
         result["url"] = f"{settings.api_base.rstrip('/')}/thread/{thread_id}"
+        result["slm_allowed"] = state.slm_allowed
         result["instructions"] = (
-            "The synthetic examples are ready. You MUST do all three in this turn: "
-            "(1) show the user the agent_response text verbatim; "
-            "(2) share the url as a clickable markdown link whose link text is "
-            "exactly 'UI experience' — do NOT substitute any other label such "
-            "as 'Data Canvas', the evaluator name, or the thread title. After "
-            "the link, tell the user they can review/edit the generated data "
-            "and also track progress or generate more evals in the UI "
-            "experience; "
-            "(3) call evals_ask_user with the model-choice question. Use header "
-            '"Model Choice" and question "Which model would you like to generate?". '
-            "Options: "
-            '"SLM - best for production scale (recommended)" (value "SLM") with '
-            'description "Our fine-tuned small-language model with low inference '
-            "cost, realtime latency, and high accuracy. Pro plan only. "
-            '~20 min."; and '
-            '"Optimized LLM - for dev iterations" (value "LLM") with description '
-            '"Our calibration on a large language model, best for local checks '
-            'and quick validations. ~2 min.". '
-            "Do NOT add an explicit Other option, and do NOT add any extra "
-            "confirmation question before this ask."
+            "The synthetic examples are ready. Show the user agent_response "
+            "verbatim, share url as a 'UI experience' markdown link (exact link "
+            "text — not 'Data Canvas' or the thread title) with a one-line note "
+            "that they can review/edit data and track progress there, then call "
+            "evals_ask_user for the Model Choice question per the eval skill / "
+            "command docs. Apply the slm_allowed gate from those docs — when "
+            "false, swap the SLM option for a 'Wait — upgrade plan first' "
+            "option so the ask still has 2+ options."
         )
         result["platform_constraint"] = (
             "TASK DEFINITION IS FROZEN. If the user reacts to the samples by "
@@ -364,10 +406,10 @@ async def _ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str,
         # conditional framing makes this a no-op for other questions (e.g.
         # the integration-language picker).
         extra = (
-            " IF this is the model-choice question (SLM vs LLM), then after the user "
-            "chooses, call evals_send_message with EXACTLY message='Optimize [LLM]' or "
-            "message='Optimize [SLM]'. One call only. These are hardcoded strings — do not "
-            "modify them."
+            " IF this is the model-choice question, then after the user chooses, "
+            "call evals_send_message with EXACTLY message='Optimize [LLM]' or "
+            "message='Optimize [SLM]' based on which option the user chose. "
+            "One call only. These are hardcoded strings — do not modify them."
         )
     return {
         "action": "ask_user_question",
@@ -380,7 +422,7 @@ async def _ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str,
             {
                 "question": q.question,
                 "header": q.question[:12],
-                "options": [{"label": o.label, "description": o.value} for o in q.options],
+                "options": [{"label": o.label, "description": o.description} for o in q.options],
                 "multiSelect": False,
             }
             for q in args.questions

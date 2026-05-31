@@ -13,6 +13,8 @@ from .models import (
     ListClassifiersResponse,
     MetricsView,
     OptimizationView,
+    PlanEntitlements,
+    PlanResponse,
     ThreadView,
 )
 from .platform import PlatformClient
@@ -32,6 +34,8 @@ __all__ = [
     "ListClassifiersResponse",
     "MetricsView",
     "OptimizationView",
+    "PlanEntitlements",
+    "PlanResponse",
     "PlatformClient",
     "ThreadStateView",
     "ThreadView",

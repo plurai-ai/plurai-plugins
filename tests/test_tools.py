@@ -543,6 +543,19 @@ async def test_start_evaluator_happy_path(
 # ── ask_user: gating + decline-fallback ──────────────────────────────────
 
 
+def test_ask_user_question_rejects_single_option() -> None:
+    """AskUserQuestion downstream requires 2-4 options; surface that at the
+    MCP boundary so a 1-option call (e.g. SLM gated out, leaving only LLM)
+    fails with a clear schema error instead of bubbling up from the host."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="at least 2"):
+        AskUserQuestion(
+            question="Only one",
+            options=[AskUserOption(label="LLM", description="Optimized LLM")],
+        )
+
+
 @pytest.mark.asyncio
 async def test_ask_user_requires_start_evaluator_first(ctx: Any) -> None:
     out = await _ask_user(
@@ -550,7 +563,10 @@ async def test_ask_user_requires_start_evaluator_first(ctx: Any) -> None:
             questions=[
                 AskUserQuestion(
                     question="Pick one",
-                    options=[AskUserOption(label="A", value="a")],
+                    options=[
+                        AskUserOption(label="A", description="a"),
+                        AskUserOption(label="B", description="b"),
+                    ],
                 )
             ]
         ),
@@ -570,8 +586,8 @@ async def test_ask_user_returns_ask_user_question_payload(ctx: Any) -> None:
                 AskUserQuestion(
                     question="LLM or SLM?",
                     options=[
-                        AskUserOption(label="LLM", value="LLM"),
-                        AskUserOption(label="SLM", value="SLM"),
+                        AskUserOption(label="LLM", description="LLM"),
+                        AskUserOption(label="SLM", description="SLM"),
                     ],
                 )
             ]
@@ -603,8 +619,8 @@ async def test_ask_user_allowed_for_slm_llm_step(ctx: Any) -> None:
                 AskUserQuestion(
                     question="LLM or SLM?",
                     options=[
-                        AskUserOption(label="LLM", value="LLM"),
-                        AskUserOption(label="SLM", value="SLM"),
+                        AskUserOption(label="LLM", description="LLM"),
+                        AskUserOption(label="SLM", description="SLM"),
                     ],
                 )
             ]
@@ -620,14 +636,33 @@ async def test_ask_user_allowed_for_slm_llm_step(ctx: Any) -> None:
 # ── send_message: surfaces url + instruction when initial flow completes ─
 
 
+def _add_plan_response(httpx_mock: Any, *, slm: bool = True, llm: bool = True) -> None:
+    """Mock GET /plan with the requested entitlements."""
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/plan",
+        method="GET",
+        json={
+            "id": "paid" if slm else "free",
+            "name": "Paid" if slm else "Free",
+            "subscription": None,
+            "entitlements": {
+                "llmEndpoints": llm,
+                "slmEndpoints": slm,
+                "threadCountLimit": None,
+            },
+        },
+    )
+
+
 @pytest.mark.asyncio
 async def test_send_message_surfaces_url_when_commit_id_present(
-    langgraph_client: FakeLangGraphClient, ctx: Any
+    httpx_mock: Any, langgraph_client: FakeLangGraphClient, ctx: Any
 ) -> None:
     """Reproduces the post-data-generation step: the agent emits a
     ``commit_id`` in state to mark the synthetic example set as committed.
     The response must surface a thread URL and a follow-up instruction, and
     re-arm has_questions for the next ask_user call."""
+    _add_plan_response(httpx_mock, slm=True)
     langgraph_client.set_state(
         {
             "messages": [
@@ -654,11 +689,12 @@ async def test_send_message_surfaces_url_when_commit_id_present(
     assert out["url"].endswith("/thread/thread-1")
     assert "instructions" in out
     instructions = out["instructions"]
-    # Must direct the orchestrator to surface the URL and ask SLM vs LLM in
-    # the same turn — no separate review-confirmation gate.
+    # Must direct the orchestrator to surface the URL and ask the model
+    # choice in the same turn — no separate review-confirmation gate. The
+    # gate policy itself lives in the eval skill / command docs, not here.
     assert "review/edit" in instructions
     assert "evals_ask_user" in instructions
-    assert "SLM" in instructions and "LLM" in instructions
+    assert "UI experience" in instructions
     assert "Ready to optimize" not in instructions
     assert "review-confirm" not in instructions.lower()
     # Frozen-task constraint must be surfaced post-commit, so a user who asks
@@ -668,8 +704,126 @@ async def test_send_message_surfaces_url_when_commit_id_present(
     assert "FROZEN" in out["platform_constraint"]
     assert "evals_start_evaluator" in out["platform_constraint"]
     assert state.committed is True
+    # Entitled user: backstop must NOT block subsequent Optimize [SLM].
+    assert state.slm_allowed is True
+    assert out["slm_allowed"] is True
     # Re-armed so the next ask_user (optimization choice) is allowed through.
     assert state.has_questions is True
+
+
+# ── send_message: SLM entitlement gating ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_send_message_post_commit_blocks_slm_when_not_entitled(
+    httpx_mock: Any, langgraph_client: FakeLangGraphClient, ctx: Any
+) -> None:
+    """Free-plan user must NOT be offered SLM. Instructions must surface the
+    upgrade prompt + subscription-billing deep link, present only the LLM
+    option, and the state flag must arm the optimize backstop."""
+    _add_plan_response(httpx_mock, slm=False)
+    langgraph_client.set_state(
+        {
+            "messages": [{"role": "assistant", "content": "Examples ready."}],
+            "commit_id": "commit-abc",
+        }
+    )
+    state = ctx.request_context.lifespan_context
+    state.has_questions = False
+    state.committed = False
+
+    out = await _send_message(SendMessageArgs(thread_id="thread-1", message="answers"), ctx)
+
+    # The structured signal carries the gate; the prose carries the gate
+    # rule for the orchestrator to apply. Instructions describe both options
+    # plus a "drop SLM when slm_allowed=false" directive — the orchestrator
+    # branches on the boolean, not on per-state copy.
+    # The structured signal carries the gate; the rule lives in the eval
+    # skill / command docs. The tool response just publishes slm_allowed
+    # and arms the optimize backstop via state.
+    assert out["slm_allowed"] is False
+    assert state.slm_allowed is False
+
+
+@pytest.mark.asyncio
+async def test_send_message_post_commit_fails_closed_on_plan_error(
+    httpx_mock: Any, langgraph_client: FakeLangGraphClient, ctx: Any
+) -> None:
+    """A 5xx from /plan must fail closed (no SLM), not crash the commit flow."""
+    httpx_mock.add_response(url=f"{PLATFORM_API}/plan", method="GET", status_code=500)
+    langgraph_client.set_state(
+        {
+            "messages": [{"role": "assistant", "content": "Examples ready."}],
+            "commit_id": "commit-abc",
+        }
+    )
+    state = ctx.request_context.lifespan_context
+    state.committed = False
+    state.slm_allowed = True
+
+    out = await _send_message(SendMessageArgs(thread_id="t1", message="ok"), ctx)
+
+    assert out["slm_allowed"] is False
+    assert state.slm_allowed is False
+
+
+@pytest.mark.asyncio
+async def test_send_message_post_commit_propagates_401_from_plan(
+    httpx_mock: Any, langgraph_client: FakeLangGraphClient, ctx: Any
+) -> None:
+    """401 on /plan must propagate so the inline auth flow fires —
+    the fail-closed handler must NOT silently swallow it.
+    """
+    httpx_mock.add_response(url=f"{PLATFORM_API}/plan", method="GET", status_code=401)
+    langgraph_client.set_state(
+        {
+            "messages": [{"role": "assistant", "content": "Examples ready."}],
+            "commit_id": "commit-abc",
+        }
+    )
+    state = ctx.request_context.lifespan_context
+    state.committed = False
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await _send_message(SendMessageArgs(thread_id="t1", message="ok"), ctx)
+
+
+@pytest.mark.asyncio
+async def test_handle_optimize_blocks_slm_when_state_blocked(ctx: Any) -> None:
+    """Backstop: if a free-plan user's orchestrator somehow sends
+    'Optimize [SLM]', the optimize handler must reject with an upgrade-link
+    envelope before kicking off the 20-min background run."""
+    state = ctx.request_context.lifespan_context
+    state.slm_allowed = False
+
+    out = await _send_message(SendMessageArgs(thread_id="thr-1", message="Optimize [SLM]"), ctx)
+
+    assert "error" in out
+    assert "paid Plurai plan" in out["error"]
+    assert "settings?tab=subscription-billing" in out["error"]
+    assert "Optimize [LLM]" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_handle_optimize_allows_llm_when_state_blocked(
+    httpx_mock: Any, langgraph_client: FakeLangGraphClient, ctx: Any
+) -> None:
+    """Backstop is SLM-only — Optimize [LLM] must still proceed normally
+    for a free-plan user."""
+    state = ctx.request_context.lifespan_context
+    state.slm_allowed = False
+    langgraph_client.set_frames([_state_event({"classifier_id": "cls-llm"})])
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/cls-llm",
+        method="GET",
+        json={"id": "cls-llm", "slug": "ev", "defaultVersion": {"number": "1.0.0"}},
+    )
+
+    out = await _send_message(SendMessageArgs(thread_id="thr-1", message="Optimize [LLM]"), ctx)
+    await _drain_background(state)
+
+    assert out.get("status") == "optimization_started"
+    assert out.get("classifier_id") == "cls-llm"
 
 
 @pytest.mark.asyncio

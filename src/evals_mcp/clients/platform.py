@@ -6,6 +6,7 @@ plumbing; exposes only the endpoints the evals MCP server actually calls.
 
 from __future__ import annotations
 
+from http import HTTPStatus
 from typing import Any, Literal, cast
 
 from .base import BaseHttpClient
@@ -17,6 +18,7 @@ from .models import (
     GetClassifierResponse,
     ListClassifiersResponse,
     OptimizationView,
+    PlanResponse,
     ThreadView,
 )
 
@@ -56,11 +58,17 @@ class PlatformClient(BaseHttpClient):
         resp = await self._request_authed(
             "GET",
             f"/classifiers/{identifier}/versions/{version}/optimization",
-            expected_error_codes=frozenset({404}),
+            expected_error_codes=frozenset({HTTPStatus.NOT_FOUND}),
         )
-        if resp.status_code == 404:
+        if resp.status_code == HTTPStatus.NOT_FOUND:
             return None
         return OptimizationView.model_validate(resp.json())
+
+    # -- Plan ------------------------------------------------------------------
+
+    async def get_plan(self) -> PlanResponse:
+        resp = await self._request_authed("GET", "/plan")
+        return PlanResponse.model_validate(resp.json())
 
     # -- API keys --------------------------------------------------------------
 
