@@ -23,6 +23,26 @@ logger: Any = structlog.get_logger(__name__)
 
 
 @dataclass
+class OptimizeRun:
+    """In-flight or terminal agent optimize run for a thread.
+
+    ``event`` is set the moment ``captured_id`` becomes non-None OR the
+    background task terminates (success or failure). Resumers wait on it.
+
+    Under the one-run-per-thread invariant enforced in
+    :func:`evals_mcp.tools.evaluator._start_optimize_and_await_classifier`,
+    an instance is the durable record of "this thread's optimize already
+    happened" — captured_id (or captured_error) is what every subsequent
+    call sees, never a fresh run.
+    """
+
+    task: asyncio.Task[None]
+    event: asyncio.Event
+    captured_id: str | None = None
+    captured_error: BaseException | None = None
+
+
+@dataclass
 class ServerState:
     platform: PlatformClient
     agent: AgentClient
@@ -38,6 +58,11 @@ class ServerState:
     # Holds references to background optimize tasks so asyncio doesn't GC
     # them mid-flight. The set is cleaned up by the task's own done callback.
     background_tasks: set[asyncio.Task[None]] = field(default_factory=lambda: set())
+    # One entry per thread_id that has ever started an optimize run in this
+    # server's lifetime. Looked up first by _start_optimize_and_await_classifier
+    # to enforce one-run-per-thread; never cleaned up while the server lives,
+    # so a resumer arriving after the run finished still sees the captured_id.
+    optimize_runs: dict[str, OptimizeRun] = field(default_factory=lambda: dict[str, OptimizeRun]())
 
 
 @asynccontextmanager

@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from ..clients import GetClassifierResponse, ThreadStateView
 from ..config import Settings, get_settings
 from ..errors import CorruptCredentialsError, MissingApiKeyError, format_tool_error
-from ..state import ServerState
+from ..state import OptimizeRun, ServerState
 
 logger: Any = structlog.get_logger(__name__)
 
@@ -32,7 +32,9 @@ class StartEvaluatorArgs(BaseModel):
             min_length=1,
             max_length=1024,
             description=(
-                "Several sentences, max 1024 chars. Include task + desired label names. "
+                "1-2 short sentences, max 1024 chars. Describe the core task and "
+                "include desired label names only if the user already mentioned them — "
+                "do NOT pre-ask the user for labels; the refinement round covers them. "
                 "No examples or criteria. "
                 "Example: 'Classify responses as health_advice or safe.'"
             ),
@@ -120,53 +122,80 @@ async def _check_slm_entitlement(state: ServerState) -> bool:
 async def _start_optimize_and_await_classifier(
     state: ServerState, thread_id: str, message: str, timeout: float
 ) -> str | None:
-    """Fire the agent's optimize run as a background task and await the
-    classifier_id appearing in an intermediate-state event mid-stream.
+    """Fire the agent's optimize run as a background task (at most once per
+    thread, ever) and await the classifier_id appearing in an
+    intermediate-state event mid-stream.
 
     The run stream stays open for the full optimization (~20 min for SLM),
     so we can't synchronously await ``run_agent``. The background task
     keeps consuming events; an ``asyncio.Event`` signals the foreground as
-    soon as ``classifier_id`` lands. Returns the classifier_id, or None if
-    it didn't surface within ``timeout``.
+    soon as ``classifier_id`` lands.
+
+    Idempotency: subsequent calls with the same ``thread_id`` resume the
+    existing ``OptimizeRun`` instead of starting a second agent run — that
+    re-fire is what would otherwise cause two parallel ReAct loops on the
+    same thread (the symptom reported when batch optimizes time out and the
+    orchestrator retries). Returns the classifier_id once captured, or
+    ``None`` if it hasn't surfaced yet (timeout) or if the agent run ended
+    without ever emitting one (degenerate). A ``captured_error`` on the
+    existing run is re-raised so the tool wrapper can format it.
     """
-    classifier_seen = asyncio.Event()
-    captured_id: str | None = None
-    captured_error: BaseException | None = None
+    existing = state.optimize_runs.get(thread_id)
+    if existing is not None:
+        return await _await_optimize_run(existing, thread_id, message, timeout)
+
+    run = OptimizeRun(task=cast("asyncio.Task[None]", None), event=asyncio.Event())
 
     def on_state(snapshot: ThreadStateView) -> None:
-        nonlocal captured_id
-        if snapshot.classifier_id:
-            captured_id = snapshot.classifier_id
-            classifier_seen.set()
+        if snapshot.classifier_id and run.captured_id is None:
+            run.captured_id = snapshot.classifier_id
+            run.event.set()
 
     async def run_optimize() -> None:
         # Failures that happen before classifier_id surfaces are captured
         # and re-raised by the foreground so the tool wrapper can map them
         # (e.g. MissingApiKeyError → inline auth prompt) instead of letting
         # the foreground time out with a misleading "no classifier_id" error.
-        nonlocal captured_error
         try:
             await state.agent.run_agent(thread_id, message, on_state=on_state)
         except (httpx.HTTPError, OSError, RuntimeError, ValidationError) as e:
-            captured_error = e
+            run.captured_error = e
             logger.exception(
                 "Background optimize failed",
                 thread_id=thread_id,
                 message=message[:120],
-                classifier_already_surfaced=captured_id is not None,
+                classifier_already_surfaced=run.captured_id is not None,
             )
         finally:
-            # Unblock the foreground in every termination case so a stream
-            # that ends without emitting classifier_id (legitimate completion
-            # or error) doesn't burn the full wait budget.
-            classifier_seen.set()
+            # Unblock all current and future waiters in every termination
+            # case so a stream that ends without emitting classifier_id
+            # (legitimate completion or error) doesn't burn the wait budget.
+            run.event.set()
 
-    task = asyncio.create_task(run_optimize())
-    state.background_tasks.add(task)
-    task.add_done_callback(state.background_tasks.discard)
+    run.task = asyncio.create_task(run_optimize())
+    state.optimize_runs[thread_id] = run
+    state.background_tasks.add(run.task)
+    run.task.add_done_callback(state.background_tasks.discard)
 
+    return await _await_optimize_run(run, thread_id, message, timeout)
+
+
+async def _await_optimize_run(
+    run: OptimizeRun, thread_id: str, message: str, timeout: float
+) -> str | None:
+    """Wait on an existing ``OptimizeRun`` for up to ``timeout`` seconds.
+
+    Returns the captured classifier_id if present; ``None`` if the run is
+    still in flight (caller surfaces resumable-timeout) or if it ended
+    cleanly without ever emitting one (caller surfaces hard failure).
+    Re-raises ``captured_error`` if the run terminated with one.
+    """
+    if run.captured_id is not None:
+        return run.captured_id
+    if run.captured_error is not None:
+        raise run.captured_error
     try:
-        await asyncio.wait_for(classifier_seen.wait(), timeout=timeout)
+        await asyncio.wait_for(run.event.wait(), timeout=timeout)
     except TimeoutError:
         logger.warning(
             "Classifier ID did not surface in time",
@@ -175,15 +204,11 @@ async def _start_optimize_and_await_classifier(
             timeout=timeout,
         )
         return None
-    if captured_id is not None:
-        logger.info("Classifier ID surfaced", classifier_id=captured_id)
-        return captured_id
-    if captured_error is not None:
-        # Background failed before classifier_id surfaced — re-raise so the
-        # tool wrapper formats it (auth prompts, 401s, transport errors)
-        # instead of the foreground returning None and producing a generic
-        # "no classifier_id emitted" timeout.
-        raise captured_error
+    if run.captured_id is not None:
+        logger.info("Classifier ID surfaced", classifier_id=run.captured_id)
+        return run.captured_id
+    if run.captured_error is not None:
+        raise run.captured_error
     return None
 
 
@@ -198,13 +223,21 @@ async def _handle_optimize(
     The classifier is created *during* the agent run, and the SLM run keeps
     the run stream open for the full ~20 min. So
     :func:`_start_optimize_and_await_classifier` fires the run as a
-    background task and resolves once an intermediate-state event carrying
-    ``classifier_id`` lands. We then resolve slug/version and return a
-    self-sufficient payload that echoes every ID the orchestrator needs.
+    background task (exactly once per thread) and resolves once an
+    intermediate-state event carrying ``classifier_id`` lands. We then
+    resolve slug/version and return a self-sufficient payload that echoes
+    every ID the orchestrator needs.
 
-    If classifier_id doesn't surface within ``classifier_wait_timeout_s``
-    (rare), raise ``RuntimeError`` so the orchestrator gets a clean error
-    envelope and can retry from scratch — never guess an ID.
+    Two terminal None cases need to be distinguished:
+
+    - **Still in flight after timeout** (common under batch load): return a
+      resumable error envelope telling the orchestrator to wake up later and
+      re-call with the same message — `_start_optimize_and_await_classifier`
+      enforces one-run-per-thread, so the resume re-awaits the same task
+      rather than firing a duplicate.
+    - **Agent run already terminated without emitting classifier_id**
+      (degenerate): raise ``RuntimeError``. The one-run rule precludes
+      restarting, so this is a hard failure that the orchestrator surfaces.
 
     Backstop: if the org lacks SLM entitlement (``state.slm_allowed`` set
     to False by the prior commit-time plan check), reject ``Optimize [SLM]``
@@ -223,14 +256,31 @@ async def _handle_optimize(
         state, thread_id, message, settings.classifier_wait_timeout_s
     )
     if classifier_id is None:
-        # The optimize stream opened, but no intermediate-state event
-        # carrying classifier_id arrived within the wait budget. Without
-        # an ID there's no programmatic recovery — raise so the
-        # orchestrator gets a clean error envelope and can retry from scratch.
+        run = state.optimize_runs.get(thread_id)
+        if run is not None and not run.task.done():
+            return {
+                "error": (
+                    f"Optimize is still running in the background for thread "
+                    f"{thread_id} — classifier_id hasn't surfaced yet (common "
+                    f"under batch load when several optimizes run in parallel). "
+                    f"The server enforces ONE optimize run per thread, so this "
+                    f"run is the run — do NOT start a fresh evaluator and do "
+                    f"NOT change the message. Schedule a wake-up of ~120s, "
+                    f"then call evals_send_message(thread_id, '{message}') "
+                    f"again with the SAME message — it re-awaits this "
+                    f"existing run, never restarts. "
+                    f"Check {settings.api_base.rstrip('/')}/thread/{thread_id} "
+                    f"for progress."
+                )
+            }
+        # Run terminated without emitting classifier_id. Under the one-run
+        # rule we won't restart it — surface as a hard failure.
         raise RuntimeError(
-            f"Optimize triggered for thread {thread_id} but no classifier_id "
-            f"emitted within {settings.classifier_wait_timeout_s:.0f}s — "
-            f"check {settings.api_base.rstrip('/')}/thread/{thread_id} and retry."
+            f"Optimize for thread {thread_id} terminated without emitting a "
+            f"classifier_id — check "
+            f"{settings.api_base.rstrip('/')}/thread/{thread_id}. "
+            f"This thread cannot be re-optimized; start a new evaluator if "
+            f"you need to retry."
         )
 
     classifier: GetClassifierResponse = await state.platform.get_classifier(classifier_id)
@@ -286,21 +336,13 @@ async def _start_evaluator(args: StartEvaluatorArgs, ctx: Context[Any, Any, Any]
             "Never try to amend the task via evals_send_message."
         ),
         "instructions": (
-            "The agent returned refinement questions in agent_response. "
-            "First decide WHO answers them: "
-            "(a) If the user defined the task with concrete criteria — e.g. they "
-            "supplied label names, judging rules, or a labeled dataset — present "
-            "the questions to the user by calling evals_ask_user with them "
-            "rephrased as options. "
-            "(b) If the user DELEGATED task definition — e.g. 'generate evals for "
-            "my <X> agent' without spelling out criteria, or you were invoked "
-            "from another skill — answer the questions yourself using the agent "
-            "codebase context and call evals_send_message with your composed "
-            "answers. Do NOT bounce questions back to a user who has no context "
-            "to answer them. "
-            "When in doubt, prefer answering yourself. Reserve evals_ask_user "
-            "for genuinely user-only choices (reuse-vs-create, SLM-vs-LLM, "
-            "integration language)."
+            "Refinement questions in agent_response cover the OVERALL task "
+            "(labels, scope, criteria) — never per-example. If the user "
+            "handed you a spec source to act on, self-answer them via "
+            "evals_send_message from that source. Otherwise, route them "
+            "to the user via evals_ask_user, rephrased as options. When "
+            "ambiguous, ask. User-facing questions always go through "
+            "evals_ask_user — never plain text."
         ),
     }
 
@@ -366,14 +408,11 @@ async def _send_message(args: SendMessageArgs, ctx: Context[Any, Any, Any]) -> d
         )
     else:
         result["instructions"] = (
-            "If agent_response contains a refinement question, apply the "
-            "WHO-answers rule from evals_start_evaluator: if the user delegated "
-            "task definition, answer yourself via evals_send_message from the "
-            "agent codebase context; otherwise call evals_ask_user. When in "
-            "doubt, answer yourself — do NOT bounce questions back to a user "
-            "who has no context. If agent_response is a status message (e.g. "
-            "'Generating examples...'), just surface it verbatim and wait — "
-            "no follow-up tool call is required."
+            "If agent_response is another refinement question, apply the "
+            "same routing rule from evals_start_evaluator (delegated → "
+            "answer yourself; specific → evals_ask_user; ambiguous → "
+            "ask the user). If it's a status update, surface it verbatim "
+            "and wait — no follow-up tool call required."
         )
     return result
 
@@ -430,6 +469,38 @@ async def _ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str,
     }
 
 
+# ── Wrapper error envelopes ──────────────────────────────────────────────
+# Extracted from the @mcp.tool wrappers so unit tests can pin the envelope
+# shape without spinning up FastMCP. The hints exist to stop the orchestrator
+# from "restarting from start_evaluator" on a transient 5xx and re-firing the
+# whole tool flow.
+
+
+def _send_message_error_envelope(thread_id: str, exc: BaseException) -> dict[str, Any]:
+    envelope: dict[str, Any] = dict(format_tool_error(exc))
+    envelope["thread_id"] = thread_id
+    envelope["recovery_hint"] = (
+        "Transient failure — the thread is still alive on the platform. "
+        "Surface the error to the user and ask whether to retry. On yes, "
+        "call evals_send_message AGAIN with the SAME thread_id and message. "
+        "Do NOT call evals_start_evaluator (would create a new thread, "
+        "orphaning this one) or evals_search_evaluators (restarts the flow "
+        "from the top and re-fires every subsequent tool)."
+    )
+    return envelope
+
+
+def _start_evaluator_error_envelope(exc: BaseException) -> dict[str, Any]:
+    envelope: dict[str, Any] = dict(format_tool_error(exc))
+    envelope["recovery_hint"] = (
+        "Surface the error to the user and ask whether to retry. On yes, "
+        "call evals_start_evaluator again with the SAME task_description. "
+        "Do NOT loop back through evals_search_evaluators — the user "
+        "already chose to create new."
+    )
+    return envelope
+
+
 # ── Registration ─────────────────────────────────────────────────────────
 
 
@@ -461,7 +532,7 @@ def register(mcp: FastMCP) -> None:
             ValueError,
         ) as e:
             logger.exception("evals_start_evaluator failed")
-            return format_tool_error(e)
+            return _start_evaluator_error_envelope(e)
 
     @mcp.tool(
         name="evals_send_message",
@@ -492,7 +563,7 @@ def register(mcp: FastMCP) -> None:
             ValueError,
         ) as e:
             logger.exception("evals_send_message failed")
-            return format_tool_error(e)
+            return _send_message_error_envelope(args.thread_id, e)
 
     @mcp.tool(
         name="evals_ask_user",

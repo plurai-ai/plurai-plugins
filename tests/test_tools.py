@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 from typing import Any
@@ -27,7 +28,9 @@ from evals_mcp.tools.evaluator import (
     StartEvaluatorArgs,
     _ask_user,
     _send_message,
+    _send_message_error_envelope,
     _start_evaluator,
+    _start_evaluator_error_envelope,
 )
 
 from .conftest import FakeLangGraphClient, FakeStreamPart
@@ -112,6 +115,40 @@ def test_format_tool_error_returns_login_prompt_for_corrupt_credentials() -> Non
     assert "auth login" in out["error"]
     assert "/tmp/x" in out["error"]
     assert "invalid JSON" in out["error"]
+
+
+def test_send_message_error_envelope_carries_thread_id_and_retry_hint() -> None:
+    """On a 5xx mid-flow, the envelope MUST carry the thread_id and a
+    recovery_hint that explicitly steers the orchestrator away from
+    evals_start_evaluator. Without these, the orchestrator's default
+    fallback is to restart from the top — which creates a new thread and
+    re-fires the whole tool flow (the reported "shoots all tools again"
+    symptom)."""
+    request = httpx.Request("POST", "https://run.plurai.ai/threads/x/runs/stream")
+    response = httpx.Response(500, content=b"backend boom", request=request)
+    err = httpx.HTTPStatusError("e", request=request, response=response)
+
+    out = _send_message_error_envelope("thr-1", err)
+
+    assert out["thread_id"] == "thr-1"
+    assert "HTTP 500" in out["error"]
+    assert "Do NOT call evals_start_evaluator" in out["recovery_hint"]
+    assert "SAME thread_id" in out["recovery_hint"]
+
+
+def test_start_evaluator_error_envelope_carries_retry_hint() -> None:
+    """Symmetric to send_message: a 5xx during start_evaluator must NOT
+    push the orchestrator to retry via evals_search_evaluators (the user
+    already chose to create new). The hint pins this."""
+    request = httpx.Request("POST", "https://app.plurai.ai/threads")
+    response = httpx.Response(500, content=b"backend boom", request=request)
+    err = httpx.HTTPStatusError("e", request=request, response=response)
+
+    out = _start_evaluator_error_envelope(err)
+
+    assert "HTTP 500" in out["error"]
+    assert "Do NOT loop back through evals_search_evaluators" in out["recovery_hint"]
+    assert "SAME task_description" in out["recovery_hint"]
 
 
 # ── Send-message guards ──────────────────────────────────────────────────
@@ -272,12 +309,155 @@ async def test_optimize_raises_when_classifier_never_emitted(
 
     # _send_message raises RuntimeError; the registered tool wrapper would
     # convert that to a {"error": ...} envelope via format_tool_error.
-    with pytest.raises(RuntimeError, match="no classifier_id emitted"):
+    with pytest.raises(RuntimeError, match="terminated without emitting"):
         await _send_message(
             SendMessageArgs(thread_id="thr-1", message="Optimize [LLM]"),
             ctx,
         )
     await _drain_background(state)
+
+
+# ── One-run-per-thread invariant ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_optimize_runs_at_most_once_per_thread(
+    monkeypatch: Any, langgraph_client: FakeLangGraphClient, ctx: Any
+) -> None:
+    """The orchestrator's natural response to a 'classifier_id not surfaced
+    yet' envelope (common under batch load) is to retry with the same
+    Optimize message. The server MUST treat that retry as a resume of the
+    existing background run, not a kick that starts a second run_agent —
+    parallel ReAct loops on the same thread are what previously caused the
+    generate_samples / manipulate_data tool storm on the agent side.
+    """
+    state = ctx.request_context.lifespan_context
+    _ = langgraph_client  # fixture activates the fake SDK client
+
+    hang_until = asyncio.Event()
+    call_count = 0
+
+    async def hanging_run_agent(thread_id: str, message: str, *, on_state: Any = None) -> None:
+        nonlocal call_count
+        call_count += 1
+        await hang_until.wait()
+
+    monkeypatch.setattr(state.agent, "run_agent", hanging_run_agent)
+    monkeypatch.setattr(get_settings(), "classifier_wait_timeout_s", 0.05)
+
+    for _ in range(3):
+        out = await _send_message(
+            SendMessageArgs(thread_id="thr-batch", message="Optimize [LLM]"),
+            ctx,
+        )
+        assert "error" in out
+        assert "still running in the background" in out["error"]
+
+    assert call_count == 1, (
+        "run_agent must fire at most once per thread — retries resume the "
+        "existing run instead of starting parallel ReAct loops."
+    )
+
+    # Release the hanging task so background drain can complete.
+    hang_until.set()
+    await _drain_background(state)
+
+
+@pytest.mark.asyncio
+async def test_optimize_resumes_with_captured_id(
+    httpx_mock: Any, monkeypatch: Any, langgraph_client: FakeLangGraphClient, ctx: Any
+) -> None:
+    """When classifier_id surfaces AFTER the first call's wait budget but
+    BEFORE the orchestrator's retry, the retry must return the captured ID
+    immediately without invoking run_agent again."""
+    from evals_mcp.clients import ThreadStateView
+
+    state = ctx.request_context.lifespan_context
+    _ = langgraph_client
+
+    emit = asyncio.Event()
+    call_count = 0
+
+    async def slow_emit(thread_id: str, message: str, *, on_state: Any = None) -> None:
+        nonlocal call_count
+        call_count += 1
+        await emit.wait()
+        if on_state is not None:
+            on_state(ThreadStateView(classifier_id="cls-late", commit_id=None, messages=[]))
+
+    monkeypatch.setattr(state.agent, "run_agent", slow_emit)
+    monkeypatch.setattr(get_settings(), "classifier_wait_timeout_s", 0.05)
+
+    out1 = await _send_message(
+        SendMessageArgs(thread_id="thr-resume", message="Optimize [LLM]"),
+        ctx,
+    )
+    assert "error" in out1
+    assert "still running in the background" in out1["error"]
+
+    # Simulate classifier_id surfacing between calls.
+    emit.set()
+    await asyncio.sleep(0)  # let slow_emit's continuation run
+    # Wait for the background task to fully finish so captured_id is settled.
+    run = state.optimize_runs["thr-resume"]
+    await run.task
+
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/cls-late",
+        method="GET",
+        json={"id": "cls-late", "slug": "my-eval", "defaultVersion": {"number": "1.0.0"}},
+    )
+
+    out2 = await _send_message(
+        SendMessageArgs(thread_id="thr-resume", message="Optimize [LLM]"),
+        ctx,
+    )
+
+    assert out2["status"] == "optimization_started"
+    assert out2["classifier_id"] == "cls-late"
+    assert call_count == 1, "resume must not re-fire run_agent"
+
+    await _drain_background(state)
+
+
+@pytest.mark.asyncio
+async def test_optimize_replays_captured_error(
+    monkeypatch: Any, langgraph_client: FakeLangGraphClient, ctx: Any
+) -> None:
+    """An agent run that terminated with an error (e.g. mid-session API key
+    revocation) is the thread's terminal state under the one-run rule. The
+    next call must re-raise the captured error (so format_tool_error fires
+    the inline auth prompt) WITHOUT invoking run_agent a second time."""
+    from evals_mcp.errors import MissingApiKeyError
+
+    state = ctx.request_context.lifespan_context
+    _ = langgraph_client
+
+    call_count = 0
+
+    async def failing_run_agent(thread_id: str, message: str, *, on_state: Any = None) -> None:
+        nonlocal call_count
+        call_count += 1
+        raise MissingApiKeyError()
+
+    monkeypatch.setattr(state.agent, "run_agent", failing_run_agent)
+    monkeypatch.setattr(get_settings(), "classifier_wait_timeout_s", 30.0)
+
+    with pytest.raises(MissingApiKeyError):
+        await _send_message(
+            SendMessageArgs(thread_id="thr-err", message="Optimize [LLM]"),
+            ctx,
+        )
+    await _drain_background(state)
+
+    # Second call on the same thread: must re-raise without re-running.
+    with pytest.raises(MissingApiKeyError):
+        await _send_message(
+            SendMessageArgs(thread_id="thr-err", message="Optimize [LLM]"),
+            ctx,
+        )
+
+    assert call_count == 1, "captured error replays without re-running"
 
 
 @pytest.mark.asyncio
