@@ -137,6 +137,12 @@ def _format_search_markdown(results: list[dict[str, Any]], total: int, offset: i
 def _format_get_results_markdown(payload: dict[str, Any]) -> str:
     base = payload["baseline"]
     opt = payload["optimized"]
+    if opt.get("accuracy") is None:
+        return (
+            f"**Classifier:** `{payload['slug']}` v{payload['version']}\n\n"
+            "Optimization still running — schedule another wake-up and "
+            "re-poll on the next wake-up."
+        )
 
     def row(label: str, m: dict[str, Any]) -> str:
         def cell(v: Any) -> str:
@@ -237,6 +243,7 @@ async def _get_results(args: GetResultsArgs, ctx: Context[Any, Any, Any]) -> Any
     if optimized.accuracy is not None:
         state.has_questions = True
 
+    pending = optimized.accuracy is None
     payload: dict[str, Any] = {
         "classifier_id": classifier_id,
         "slug": slug,
@@ -244,6 +251,18 @@ async def _get_results(args: GetResultsArgs, ctx: Context[Any, Any, Any]) -> Any
         "endpoint_url": f"{settings.run_base}/ioa/v1/{slug}/{version}",
         "baseline": baseline.model_dump(),
         "optimized": optimized.model_dump(),
+        "instructions": (
+            "Optimization still running. Schedule another wake-up via "
+            "ScheduleWakeup (60s LLM, 300s SLM) and END this turn. Do NOT "
+            "call evals_send_message or any other tool — only re-poll via "
+            "evals_get_results on the next wake-up."
+            if pending
+            else (
+                "Results landed. Surface baseline vs optimized metrics to "
+                "the user, then proceed to the integration-language step "
+                "per the eval skill/command."
+            )
+        ),
     }
     if args.response_format == "json":
         return payload

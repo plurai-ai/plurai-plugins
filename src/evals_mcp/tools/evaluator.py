@@ -299,6 +299,14 @@ async def _handle_optimize(
         "endpoint_url": f"{settings.run_base}/ioa/v1/{slug}/{version}",
         "thread_id": thread_id,
         "url": f"{settings.api_base.rstrip('/')}/thread/{thread_id}",
+        "instructions": (
+            "Optimization is now running in the background. Schedule a "
+            "wake-up via ScheduleWakeup (delaySeconds=120 for LLM, 1200 "
+            "for SLM) and END this turn. Do NOT call evals_send_message, "
+            "evals_ask_user, or any other tool. The only legitimate next "
+            "tool call is evals_get_results on wake-up — pass the "
+            "classifier_id from this response."
+        ),
     }
 
 
@@ -364,6 +372,24 @@ async def _send_message(args: SendMessageArgs, ctx: Context[Any, Any, Any]) -> d
 
     if normalized.startswith("optimize"):
         return await _handle_optimize(state, settings, thread_id, message)
+
+    # Optimization-in-flight guard: once a thread has fired Optimize and the
+    # background agent run hasn't finished, the orchestrator's only legitimate
+    # action is polling evals_get_results. Stray send_message calls during
+    # this window (~2 min LLM, ~20 min SLM) are off-task and land on the live
+    # thread, derailing optimization. Reject them with a recovery hint that
+    # routes the orchestrator back to the poll.
+    opt = state.optimize_runs.get(thread_id)
+    if opt is not None and not opt.task.done():
+        return {
+            "error": (
+                f"Optimization is in progress for thread {thread_id} "
+                f"(classifier_id {opt.captured_id or 'pending'}). Do not "
+                "send messages until results land. Schedule a wake-up via "
+                "ScheduleWakeup and call evals_get_results on wake-up."
+            ),
+            "recovery_hint": "evals_get_results",
+        }
 
     await state.agent.run_agent(thread_id, message)
     snapshot = await state.agent.get_state(thread_id)

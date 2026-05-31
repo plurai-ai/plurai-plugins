@@ -197,6 +197,12 @@ async def test_optimize_returns_classifier_id_for_round_trip(
     assert out["slug"] == "my-eval"
     assert out["version"] == "1.0.0"
     assert "/ioa/v1/my-eval/1.0.0" in out["endpoint_url"]
+    # The kickoff must self-describe the wait contract: orchestrators that
+    # drift have no other prompt at this moment, and the field is what stops
+    # them firing stray send_message/ask_user calls during the 2-20min run.
+    assert "ScheduleWakeup" in out["instructions"]
+    assert "evals_get_results" in out["instructions"]
+    assert "END this turn" in out["instructions"]
 
 
 @pytest.mark.asyncio
@@ -460,6 +466,157 @@ async def test_optimize_replays_captured_error(
         )
 
     assert call_count == 1, "captured error replays without re-running"
+
+
+@pytest.mark.asyncio
+async def test_send_message_blocked_during_in_flight_optimize(ctx: Any) -> None:
+    """The kickoff returns once classifier_id surfaces, but the background
+    agent run continues for the rest of the optimization (~20 min for SLM).
+    A stray ``evals_send_message`` during that window — confirmed in the
+    field as off-task "what else can you do?" chat — lands on the live
+    thread and derails optimization. The guard MUST reject it with a
+    recovery_hint that routes the orchestrator back to evals_get_results."""
+    from evals_mcp.state import OptimizeRun
+
+    state = ctx.request_context.lifespan_context
+
+    hang = asyncio.Event()
+
+    async def _hang() -> None:
+        await hang.wait()
+
+    task = asyncio.create_task(_hang())
+    try:
+        state.optimize_runs["thr-busy"] = OptimizeRun(
+            task=task, event=asyncio.Event(), captured_id="cls-x"
+        )
+
+        out = await _send_message(
+            SendMessageArgs(thread_id="thr-busy", message="What else can you do?"),
+            ctx,
+        )
+
+        assert "error" in out
+        assert "in progress" in out["error"]
+        assert "cls-x" in out["error"]
+        assert out["recovery_hint"] == "evals_get_results"
+    finally:
+        hang.set()
+        with contextlib.suppress(Exception):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_send_message_unblocked_after_optimize_completes(
+    langgraph_client: FakeLangGraphClient, ctx: Any
+) -> None:
+    """``optimize_runs`` entries persist for the server's lifetime — the
+    guard must read ``task.done()`` rather than just key existence,
+    otherwise it would block forever after the first optimize on a thread."""
+    from evals_mcp.state import OptimizeRun
+
+    state = ctx.request_context.lifespan_context
+
+    async def _done() -> None:
+        return
+
+    task = asyncio.create_task(_done())
+    await task  # ensure it's terminal before the guard reads task.done()
+    state.optimize_runs["thr-finished"] = OptimizeRun(
+        task=task, event=asyncio.Event(), captured_id="cls-y"
+    )
+
+    # Configure the agent fake so the normal send_message path returns a
+    # benign agent_response — the test cares that the guard didn't fire,
+    # not what the agent said.
+    langgraph_client.set_frames([_state_event({"messages": []})])
+
+    out = await _send_message(
+        SendMessageArgs(thread_id="thr-finished", message="add one more sample"),
+        ctx,
+    )
+
+    # Guard would have returned {"error": ..., "recovery_hint": ...}; the
+    # regular path returns agent_response + message_count.
+    assert "agent_response" in out
+    assert "message_count" in out
+    assert "recovery_hint" not in out
+
+
+@pytest.mark.asyncio
+async def test_get_results_instructions_branch_on_pending_vs_done(
+    httpx_mock: Any, ctx: Any
+) -> None:
+    """The response's ``instructions`` field is what stops the orchestrator
+    drifting during the polling wait. Pending must say "still running",
+    done must say "results landed" — without these the model invents
+    activity (seen in the field as a premature integration-language ask)."""
+    # Pending case.
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/c-pending",
+        method="GET",
+        json={"slug": "s-pending", "defaultVersion": {"number": "1.0.0"}},
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/c-pending/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/s-pending/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+    pending = await _get_results(
+        GetResultsArgs(classifier_id="c-pending", response_format="json"), ctx
+    )
+    assert isinstance(pending, dict)
+    assert "still running" in pending["instructions"]
+    assert "evals_get_results" in pending["instructions"]
+    assert "END this turn" in pending["instructions"]
+
+    # Pending markdown must NOT render a table of em-dashes that looks like
+    # results were ready.
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/c-pending",
+        method="GET",
+        json={"slug": "s-pending", "defaultVersion": {"number": "1.0.0"}},
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/c-pending/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/s-pending/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+    pending_md = await _get_results(
+        GetResultsArgs(classifier_id="c-pending", response_format="markdown"), ctx
+    )
+    assert isinstance(pending_md, str)
+    assert "still running" in pending_md
+    assert "| baseline |" not in pending_md
+
+    # Done case.
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/c-done",
+        method="GET",
+        json={"slug": "s-done", "defaultVersion": {"number": "1.0.0"}},
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/c-done/versions/1.0.0/optimization",
+        method="GET",
+        json={
+            "baseline": {"accuracy": 0.6, "precision": 0.6, "recall": 0.6},
+            "optimized": {"accuracy": 0.9, "precision": 0.9, "recall": 0.9},
+        },
+    )
+    done = await _get_results(GetResultsArgs(classifier_id="c-done", response_format="json"), ctx)
+    assert isinstance(done, dict)
+    assert "Results landed" in done["instructions"]
+    assert "integration-language" in done["instructions"]
 
 
 @pytest.mark.asyncio
