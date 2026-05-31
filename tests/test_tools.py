@@ -15,8 +15,10 @@ from evals_mcp.clients.agent import _INTERMEDIATE_STATE_EVENT_NAME
 from evals_mcp.config import get_settings
 from evals_mcp.errors import format_tool_error, safe_error_body
 from evals_mcp.tools.classifiers import (
+    GetApiKeyArgs,
     GetResultsArgs,
     SearchEvaluatorsArgs,
+    _get_api_key,
     _get_results,
     _search_evaluators,
 )
@@ -1037,3 +1039,34 @@ async def test_send_message_no_url_when_no_commit_id(
     assert state.committed is False
     # Refinement question detected → has_questions re-armed via the '?' branch.
     assert state.has_questions is True
+
+
+# ── get_api_key: reuses stored auth key, never creates a second one ──────
+
+
+@pytest.mark.asyncio
+async def test_get_api_key_returns_stored_key(monkeypatch: Any, ctx: Any) -> None:
+    """The integration snippet must embed the SAME key the user configured
+    at session start — `auth login` already stored it on disk. Creating a
+    fresh key on the Plurai backend (the old behaviour) just clutters the
+    user's account; both the REST API and the deployed evaluator endpoint
+    accept the same long-lived key."""
+    monkeypatch.setattr("evals_mcp.tools.classifiers.load_api_key", lambda: "ak_test_xyz")
+
+    out = await _get_api_key(GetApiKeyArgs(), ctx)
+
+    assert out == {"api_key": "ak_test_xyz"}
+
+
+@pytest.mark.asyncio
+async def test_get_api_key_raises_missing_when_no_key_on_disk(monkeypatch: Any, ctx: Any) -> None:
+    """If the credentials file is missing (e.g. user ran `auth logout` mid
+    session), the tool must surface MissingApiKeyError so the standard
+    inline auth prompt fires — not silently emit an empty string into the
+    integration snippet."""
+    from evals_mcp.errors import MissingApiKeyError
+
+    monkeypatch.setattr("evals_mcp.tools.classifiers.load_api_key", lambda: None)
+
+    with pytest.raises(MissingApiKeyError):
+        await _get_api_key(GetApiKeyArgs(), ctx)

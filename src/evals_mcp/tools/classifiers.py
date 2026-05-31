@@ -1,4 +1,4 @@
-"""Classifier tools: search_evaluators, get_results, create_api_key."""
+"""Classifier tools: search_evaluators, get_results, get_api_key."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..auth import load_api_key
 from ..clients import (
     ClassifierSummaryView,
     GetClassifierResponse,
@@ -16,7 +17,7 @@ from ..clients import (
     OptimizationView,
 )
 from ..config import get_settings
-from ..errors import format_tool_error
+from ..errors import MissingApiKeyError, format_tool_error
 from ..state import ServerState
 
 _StrictModel = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -61,12 +62,8 @@ class GetResultsArgs(BaseModel):
     ]
 
 
-class CreateApiKeyArgs(BaseModel):
+class GetApiKeyArgs(BaseModel):
     model_config = _StrictModel
-    name: Annotated[
-        str,
-        Field(default="evaluator-endpoint", description="Display name for the API key."),
-    ]
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -253,10 +250,19 @@ async def _get_results(args: GetResultsArgs, ctx: Context[Any, Any, Any]) -> Any
     return _format_get_results_markdown(payload)
 
 
-async def _create_api_key(args: CreateApiKeyArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
-    state = _state(ctx)
-    result = await state.platform.create_api_key(args.name)
-    return {"api_key": result.secret, "key_id": result.id}
+async def _get_api_key(args: GetApiKeyArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
+    """Return the user's stored Plurai API key for the integration snippet.
+
+    Reads the on-disk credentials configured by ``auth login`` — does NOT
+    create a new key on the Plurai backend. The same key authenticates both
+    the REST API and the deployed evaluator endpoint, so a separate
+    endpoint key would just clutter the user's account.
+    """
+    del args, ctx
+    key = load_api_key()
+    if not key:
+        raise MissingApiKeyError()
+    return {"api_key": key}
 
 
 # ── Registration ─────────────────────────────────────────────────────────
@@ -309,21 +315,24 @@ def register(mcp: FastMCP) -> None:
             return format_tool_error(e)
 
     @mcp.tool(
-        name="evals_create_api_key",
-        description="Generate an API key for the evaluator endpoint.",
+        name="evals_get_api_key",
+        description=(
+            "Return the user's stored Plurai API key for embedding in the "
+            "integration snippet. Reads from local credentials configured by "
+            "`auth login` — does not create a new key. The same key authenticates "
+            "both the REST API and the deployed evaluator endpoint."
+        ),
         annotations=ToolAnnotations(
-            readOnlyHint=False,
+            readOnlyHint=True,
             destructiveHint=False,
-            idempotentHint=False,
-            openWorldHint=True,
+            idempotentHint=True,
+            openWorldHint=False,
         ),
     )
-    async def evals_create_api_key(
-        args: CreateApiKeyArgs, ctx: Context[Any, Any, Any]
-    ) -> dict[str, Any]:
+    async def evals_get_api_key(args: GetApiKeyArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
         try:
-            return await _create_api_key(args, ctx)
+            return await _get_api_key(args, ctx)
         except Exception as e:
             return format_tool_error(e)
 
-    _ = (evals_search_evaluators, evals_get_results, evals_create_api_key)
+    _ = (evals_search_evaluators, evals_get_results, evals_get_api_key)

@@ -39,6 +39,6 @@ The plugin will:
 1. **Create an evaluator** on the Plurai platform from your description.
 2. **Ask refinement questions** through an interactive UI to clarify what "good" looks like.
 3. **Optimize the evaluator** (LLM- or SLM-based, depending on the task).
-4. **Return a deployed HTTPS endpoint** plus a per-evaluator API key you can call from your application.
+4. **Return a deployed HTTPS endpoint** that you can call from your application using your existing Plurai API key — the same one you configured above. No second key is created.
 
 

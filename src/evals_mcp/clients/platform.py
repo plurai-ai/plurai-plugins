@@ -11,8 +11,6 @@ from typing import Any, Literal, cast
 
 from .base import BaseHttpClient
 from .models import (
-    CreateApiKeyRequest,
-    CreateApiKeyResponse,
     CreateExampleFileRequest,
     CreateExampleFileResponse,
     GetClassifierResponse,
@@ -69,17 +67,6 @@ class PlatformClient(BaseHttpClient):
     async def get_plan(self) -> PlanResponse:
         resp = await self._request_authed("GET", "/plan")
         return PlanResponse.model_validate(resp.json())
-
-    # -- API keys --------------------------------------------------------------
-
-    async def create_api_key(self, name: str) -> CreateApiKeyResponse:
-        request = CreateApiKeyRequest(name=name)
-        resp = await self._request_authed(
-            "POST",
-            "/api-keys",
-            json_body=request.model_dump(by_alias=True),
-        )
-        return CreateApiKeyResponse.model_validate(resp.json())
 
     # -- Example-set uploads ---------------------------------------------------
 

@@ -104,24 +104,6 @@ class OptimizationView(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# REST: API keys
-# ---------------------------------------------------------------------------
-
-
-class CreateApiKeyRequest(BaseModel):
-    model_config = _StrictModel
-
-    name: str
-
-
-class CreateApiKeyResponse(BaseModel):
-    model_config = _LooseModel
-
-    id: str
-    secret: str
-
-
-# ---------------------------------------------------------------------------
 # REST: Example-set file uploads
 # ---------------------------------------------------------------------------
 

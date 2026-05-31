@@ -5,7 +5,6 @@ from .base import BaseHttpClient, BaseHttpClientConfig, HeadersProvider
 from .models import (
     ClassifierDefaultVersionView,
     ClassifierSummaryView,
-    CreateApiKeyResponse,
     CreateExampleFileRequest,
     CreateExampleFileResponse,
     ExampleRecordInput,
@@ -25,7 +24,6 @@ __all__ = [
     "BaseHttpClientConfig",
     "ClassifierDefaultVersionView",
     "ClassifierSummaryView",
-    "CreateApiKeyResponse",
     "CreateExampleFileRequest",
     "CreateExampleFileResponse",
     "ExampleRecordInput",
