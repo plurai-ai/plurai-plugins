@@ -17,20 +17,13 @@ from typing import Any, cast
 import httpx
 
 _LOGIN_PROMPT = (
-    "Ask the user to paste their Plurai API key, save it via "
-    "`uv run --project ${CLAUDE_PLUGIN_ROOT} python -m evals_mcp auth login --key <KEY>`, "
-    "then retry the failed tool call."
+    "Paste a Plurai API key from https://app.plurai.ai/settings?tab=api-keys "
+    "and save it via `auth login`."
 )
 
 _REVOKED_KEY_PROMPT = (
-    "The key on disk was rejected by the server — it is revoked, expired, or otherwise invalid. "
-    "If you have a Plurai API key from earlier in this conversation, that IS the rejected key — "
-    "do NOT call `auth login` with it. You MUST ask the user (in chat, this turn) to paste a "
-    "freshly-generated key from https://app.plurai.ai/settings?tab=api-keys (Create new key); "
-    "Only after the user supplies a new key "
-    "in this turn, run "
-    "`uv run --project ${CLAUDE_PLUGIN_ROOT} python -m evals_mcp auth login --key <NEW_KEY>` "
-    "and retry the failed tool call."
+    "Generate a new key at https://app.plurai.ai/settings?tab=api-keys "
+    "and save it via `auth login`."
 )
 
 
