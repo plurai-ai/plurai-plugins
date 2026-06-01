@@ -1173,6 +1173,40 @@ async def test_handle_optimize_allows_llm_when_state_blocked(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_message",
+    [
+        "Optimize [other]",
+        "Optimize [GPT4]",
+        "Optimize [SLM] please",
+        "Optimize[SLM]",
+    ],
+)
+async def test_handle_optimize_rejects_malformed_payload(
+    langgraph_client: FakeLangGraphClient, ctx: Any, bad_message: str
+) -> None:
+    """Format backstop: only literal 'Optimize [LLM]' / 'Optimize [SLM]' are
+    accepted. Anything else (extra text, third payload, missing space) must
+    return an error envelope and MUST NOT start a background run — otherwise
+    the orchestrator could silently fire SLM-tier compute by interpreting an
+    'Other' / declined ask into a malformed message."""
+    state = ctx.request_context.lifespan_context
+    state.slm_allowed = True
+
+    out = await _send_message(SendMessageArgs(thread_id="thr-1", message=bad_message), ctx)
+
+    assert "error" in out
+    assert "Optimize [LLM]" in out["error"]
+    assert "Optimize [SLM]" in out["error"]
+    assert "explicitly pick" in out["error"]
+    # No background run should have been spawned — the orchestrator must re-ask
+    # the user, not silently fire optimization on a misinterpreted answer.
+    assert "thr-1" not in state.optimize_runs
+    # And the FakeLangGraphClient must not have been driven (no run_agent call).
+    assert langgraph_client.runs.calls == []
+
+
+@pytest.mark.asyncio
 async def test_send_message_no_url_when_no_commit_id(
     langgraph_client: FakeLangGraphClient, ctx: Any
 ) -> None:

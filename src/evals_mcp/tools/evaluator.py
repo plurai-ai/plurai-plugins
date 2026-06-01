@@ -239,12 +239,33 @@ async def _handle_optimize(
       (degenerate): raise ``RuntimeError``. The one-run rule precludes
       restarting, so this is a hard failure that the orchestrator surfaces.
 
-    Backstop: if the org lacks SLM entitlement (``state.slm_allowed`` set
-    to False by the prior commit-time plan check), reject ``Optimize [SLM]``
-    before starting the background run. The gated UX in ``_send_message``
-    already omits the SLM option, but this defends against orchestrator drift.
+    Backstops (both defend against orchestrator drift):
+
+    1. **Format**: reject any ``Optimize [X]`` whose payload isn't ``[SLM]``
+       or ``[LLM]``. The model-choice ask only ever yields those two; a
+       malformed payload means the orchestrator interpreted an "Other" /
+       declined ask into something we don't accept. The Plurai agent would
+       silently mishandle it, so we fail loudly here and route the
+       orchestrator back to ``evals_ask_user``.
+    2. **Entitlement**: if the org lacks SLM entitlement
+       (``state.slm_allowed`` set to False by the prior commit-time plan
+       check), reject ``Optimize [SLM]`` before starting the background run.
+       The gated UX in ``_send_message`` already omits the SLM option, but
+       this defends against orchestrator drift.
     """
-    if message.strip().lower() == "optimize [slm]" and not state.slm_allowed:
+    normalized = message.strip().lower()
+    if normalized not in ("optimize [slm]", "optimize [llm]"):
+        return {
+            "error": (
+                f"Invalid optimize message {message!r}. Expected exactly "
+                "'Optimize [LLM]' or 'Optimize [SLM]' (square brackets are "
+                "literal). The user must explicitly pick a model via the "
+                "Model Choice evals_ask_user — never invent a payload from "
+                "an 'Other' / declined answer. Re-ask via evals_ask_user "
+                "with the two model options per the eval skill / command docs."
+            )
+        }
+    if normalized == "optimize [slm]" and not state.slm_allowed:
         return {
             "error": (
                 "SLM optimization requires a paid Plurai plan. Upgrade at "
@@ -471,10 +492,11 @@ async def _ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str,
         # conditional framing makes this a no-op for other questions (e.g.
         # the integration-language picker).
         extra = (
-            " IF this is the model-choice question, then after the user chooses, "
-            "call evals_send_message with EXACTLY message='Optimize [LLM]' or "
-            "message='Optimize [SLM]' based on which option the user chose. "
-            "One call only. These are hardcoded strings — do not modify them."
+            " IF this is the model-choice question: after the user picks, call "
+            "evals_send_message ONCE with EXACTLY 'Optimize [LLM]' or "
+            "'Optimize [SLM]' (hardcoded — do not modify). On Other / decline / "
+            "ambiguity, follow the Other policy in the eval skill / command — "
+            "never fire optimization without an explicit user pick."
         )
     return {
         "action": "ask_user_question",
