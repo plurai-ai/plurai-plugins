@@ -36,6 +36,8 @@ At every decision point in the flow (refinement questions, model choice, integra
 
 When ambiguous, ask. User-facing questions ALWAYS go through `evals_ask_user` — never invent a plain-text Q&A turn.
 
+**Recommend a default when one option is clearly best.** Whenever you call `evals_ask_user` and one of the options is the defensible default (the one most users in this situation should pick), append `(Recommended)` to that option's label and list it first. Apply this to refinement questions (labels, scope, judging criteria), the reuse-vs-create-new ask, and the Language ask — anywhere a defensible default exists. If the options are genuinely equivalent for this user (no clear winner), do not force one — list them in a natural order without a marker.
+
 **Skip handling (refinement only).** Treat the host's `AskUserQuestion` as a *partial* form: the user may submit having answered only some tabs, or escape/decline the whole thing.
 - For any refinement question that **has a user answer in the response**: use that answer when composing `evals_send_message`.
 - For any refinement question with **no user answer** (omitted from `answers`, or the whole response is `"User declined to answer questions"`/interrupted): fill it yourself with the orchestrator's own pick using sensible defaults.
@@ -49,7 +51,7 @@ After the refinement round (whether the user answered via `evals_ask_user` or yo
 2. **Surface the UI experience link, then settle the model.** Once the response includes `url`, share it as a clickable markdown link whose link text is exactly `UI experience` — do NOT substitute any other label such as "Data Canvas", the evaluator name, or the thread title. Then tell the user they can review/edit the generated data and track progress in the UI experience.
 
    Apply the per-decision rule: if the user already specified a model preference upfront, use it (jump to step 3 with `Optimize [LLM]` or `Optimize [SLM]`). Otherwise, call `evals_ask_user` with header `"Model Choice"` and question `"Which model would you like to generate?"`. Default options:
-   - label `"SLM - best for production scale (recommended)"`, description `"Our fine-tuned small-language model with low inference cost, realtime latency, and high accuracy. Pro plan only. ~20 min."`
+   - label `"SLM - best for production scale (Recommended)"`, description `"Our fine-tuned small-language model with low inference cost, realtime latency, and high accuracy. Pro plan only. ~20 min."`
    - label `"Optimized LLM - for dev iterations"`, description `"Our calibration on a large language model, best for local checks and quick validations. ~2 min."`
 
    **Gate on `slm_allowed` (from the response).** If `false`, swap the option list (do NOT drop to one option — `evals_ask_user` rejects single-option questions). Use these two options, and prepend the upgrade prompt verbatim to the question: "SLM optimization requires a paid Plurai plan. Upgrade at [Plurai Settings](https://app.plurai.ai/settings?tab=subscription-billing) to unlock the fine-tuned small-language model."
