@@ -1,6 +1,6 @@
 {
     "name": "evals",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "description": "Create fine-tuned LLM-as-a-judge evaluators from labeled data on the Plurai platform",
     "author": {
         "name": "Plurai",
@@ -9,7 +9,7 @@
     "homepage": "https://plurai.ai",
     "keywords": ["evaluation", "llm-as-a-judge", "fine-tuning", "classifier"],
     "mcpServers": {
-        "evals": {
+        "plurai": {
             "command": "uv",
             "args": [
                 "run", "--project", "${CLAUDE_PLUGIN_ROOT}",

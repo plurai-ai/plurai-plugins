@@ -45,7 +45,7 @@ class StartEvaluatorArgs(BaseModel):
 class SendMessageArgs(BaseModel):
     model_config = _StrictModel
     thread_id: Annotated[
-        str, Field(min_length=1, description="Thread ID returned by evals_start_evaluator.")
+        str, Field(min_length=1, description="Thread ID returned by start_evaluator.")
     ]
     message: Annotated[str, Field(min_length=1, description="Message to send to the Plurai agent.")]
 
@@ -246,7 +246,7 @@ async def _handle_optimize(
        malformed payload means the orchestrator interpreted an "Other" /
        declined ask into something we don't accept. The Plurai agent would
        silently mishandle it, so we fail loudly here and route the
-       orchestrator back to ``evals_ask_user``.
+       orchestrator back to ``ask_user``.
     2. **Entitlement**: if the org lacks SLM entitlement
        (``state.slm_allowed`` set to False by the prior commit-time plan
        check), reject ``Optimize [SLM]`` before starting the background run.
@@ -260,8 +260,8 @@ async def _handle_optimize(
                 f"Invalid optimize message {message!r}. Expected exactly "
                 "'Optimize [LLM]' or 'Optimize [SLM]' (square brackets are "
                 "literal). The user must explicitly pick a model via the "
-                "Model Choice evals_ask_user — never invent a payload from "
-                "an 'Other' / declined answer. Re-ask via evals_ask_user "
+                "Model Choice ask_user — never invent a payload from "
+                "an 'Other' / declined answer. Re-ask via ask_user "
                 "with the two model options per the eval skill / command docs."
             )
         }
@@ -273,7 +273,7 @@ async def _handle_optimize(
                 "then retry. To run now, pick the Optimized LLM option instead."
             ),
             "recovery_hint": (
-                "Re-ask the model choice via evals_ask_user using the upgrade-gated "
+                "Re-ask the model choice via ask_user using the upgrade-gated "
                 "variant from the eval skill. If the user picks 'Continue with "
                 "Optimized LLM', send 'Optimize [LLM]'."
             ),
@@ -292,7 +292,7 @@ async def _handle_optimize(
                     f"The server enforces ONE optimize run per thread, so this "
                     f"run is the run — do NOT start a fresh evaluator and do "
                     f"NOT change the message. Schedule a wake-up of ~120s, "
-                    f"then call evals_send_message(thread_id, '{message}') "
+                    f"then call send_message(thread_id, '{message}') "
                     f"again with the SAME message — it re-awaits this "
                     f"existing run, never restarts. "
                     f"Check {settings.api_base.rstrip('/')}/thread/{thread_id} "
@@ -328,9 +328,9 @@ async def _handle_optimize(
         "instructions": (
             "Optimization is now running in the background. Schedule a "
             "wake-up via ScheduleWakeup (delaySeconds=120 for LLM, 1200 "
-            "for SLM) and END this turn. Do NOT call evals_send_message, "
-            "evals_ask_user, or any other tool. The only legitimate next "
-            "tool call is evals_get_results on wake-up — pass the "
+            "for SLM) and END this turn. Do NOT call send_message, "
+            "ask_user, or any other tool. The only legitimate next "
+            "tool call is get_results on wake-up — pass the "
             "classifier_id from this response."
         ),
     }
@@ -362,21 +362,21 @@ async def _start_evaluator(args: StartEvaluatorArgs, ctx: Context[Any, Any, Any]
         "agent_response": agent_response,
         "platform_constraint": (
             "TASK DEFINITION IS FROZEN. The task_description passed here is "
-            "permanent for this evaluator — subsequent evals_send_message calls "
+            "permanent for this evaluator — subsequent send_message calls "
             "only refine the generated samples, never the task itself "
             "(judging criteria, scope). If the user later wants to change the "
             "task, you MUST start a fresh evaluator by calling "
-            "evals_start_evaluator again with a revised task_description. "
-            "Never try to amend the task via evals_send_message."
+            "start_evaluator again with a revised task_description. "
+            "Never try to amend the task via send_message."
         ),
         "instructions": (
             "Refinement questions in agent_response cover the OVERALL task "
             "(labels, scope, criteria) — never per-example. If the user "
             "handed you a spec source to act on, self-answer them via "
-            "evals_send_message from that source. Otherwise, route them "
-            "to the user via evals_ask_user, rephrased as options. When "
+            "send_message from that source. Otherwise, route them "
+            "to the user via ask_user, rephrased as options. When "
             "ambiguous, ask. User-facing questions always go through "
-            "evals_ask_user — never plain text."
+            "ask_user — never plain text."
         ),
     }
 
@@ -401,7 +401,7 @@ async def _send_message(args: SendMessageArgs, ctx: Context[Any, Any, Any]) -> d
 
     # Optimization-in-flight guard: once a thread has fired Optimize and the
     # background agent run hasn't finished, the orchestrator's only legitimate
-    # action is polling evals_get_results. Stray send_message calls during
+    # action is polling get_results. Stray send_message calls during
     # this window (~2 min LLM, ~20 min SLM) are off-task and land on the live
     # thread, derailing optimization. Reject them with a recovery hint that
     # routes the orchestrator back to the poll.
@@ -412,9 +412,9 @@ async def _send_message(args: SendMessageArgs, ctx: Context[Any, Any, Any]) -> d
                 f"Optimization is in progress for thread {thread_id} "
                 f"(classifier_id {opt.captured_id or 'pending'}). Do not "
                 "send messages until results land. Schedule a wake-up via "
-                "ScheduleWakeup and call evals_get_results on wake-up."
+                "ScheduleWakeup and call get_results on wake-up."
             ),
-            "recovery_hint": "evals_get_results",
+            "recovery_hint": "get_results",
         }
 
     await state.agent.run_agent(thread_id, message)
@@ -428,7 +428,7 @@ async def _send_message(args: SendMessageArgs, ctx: Context[Any, Any, Any]) -> d
     if snapshot.classifier_id:
         result["classifier_id"] = snapshot.classifier_id
 
-    # Re-arm so the model can call evals_ask_user next, whether the agent
+    # Re-arm so the model can call ask_user next, whether the agent
     # came back with another refinement question or just finished the
     # initial flow and the next step is the SLM/LLM choice.
     state.has_questions = True
@@ -442,7 +442,7 @@ async def _send_message(args: SendMessageArgs, ctx: Context[Any, Any, Any]) -> d
             "verbatim, share url as a 'UI experience' markdown link (exact link "
             "text — not 'Data Canvas' or the thread title) with a one-line note "
             "that they can review/edit data and track progress there, then call "
-            "evals_ask_user for the Model Choice question per the eval skill / "
+            "ask_user for the Model Choice question per the eval skill / "
             "command docs. Apply the slm_allowed gate from those docs — when "
             "false, swap the SLM option for a 'Wait — upgrade plan first' "
             "option so the ask still has 2+ options."
@@ -450,19 +450,19 @@ async def _send_message(args: SendMessageArgs, ctx: Context[Any, Any, Any]) -> d
         result["platform_constraint"] = (
             "TASK DEFINITION IS FROZEN. If the user reacts to the samples by "
             "asking to change the judging criteria or task scope, do NOT "
-            "send that as a chat message — evals_send_message can only refine "
+            "send that as a chat message — send_message can only refine "
             "samples, not the task. Tell the user the task can't be edited, "
-            "confirm they want to restart, then call evals_start_evaluator "
+            "confirm they want to restart, then call start_evaluator "
             "with a revised task_description. For sample edits "
             "(add/remove/modify individual examples), prefer the UI experience "
-            "link surfaced above; only edit via evals_send_message if the user "
+            "link surfaced above; only edit via send_message if the user "
             "explicitly asks to do it through chat."
         )
     else:
         result["instructions"] = (
             "If agent_response is another refinement question, apply the "
-            "same routing rule from evals_start_evaluator (delegated → "
-            "answer yourself; specific → evals_ask_user; ambiguous → "
+            "same routing rule from start_evaluator (delegated → "
+            "answer yourself; specific → ask_user; ambiguous → "
             "ask the user). If it's a status update, surface it verbatim "
             "and wait — no follow-up tool call required."
         )
@@ -484,7 +484,7 @@ async def _ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str,
     if not state.has_questions:
         return {
             "error": (
-                "You must call evals_start_evaluator or evals_search_evaluators first. "
+                "You must call start_evaluator or search_evaluators first. "
                 "Do NOT ask your own questions before the flow has begun."
             )
         }
@@ -498,7 +498,7 @@ async def _ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str,
         # the integration-language picker).
         extra = (
             " IF this is the model-choice question: after the user picks, call "
-            "evals_send_message ONCE with EXACTLY 'Optimize [LLM]' or "
+            "send_message ONCE with EXACTLY 'Optimize [LLM]' or "
             "'Optimize [SLM]' (hardcoded — do not modify). On Other / decline / "
             "ambiguity, follow the Other policy in the eval skill / command — "
             "never fire optimization without an explicit user pick."
@@ -512,7 +512,7 @@ async def _ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str,
             + " If AskUserQuestion returns 'User declined to answer questions' (or is "
             "otherwise cancelled/interrupted/escaped), treat it as a SKIP and follow "
             "the default action documented in your skill or command for this specific "
-            "decision point. Do NOT retry the same ask, do NOT re-call evals_ask_user "
+            "decision point. Do NOT retry the same ask, do NOT re-call ask_user "
             "with the same questions, do NOT surface a 'tool interrupted' or 'user "
             "declined' message verbatim to the user, and do NOT stall the flow."
         ),
@@ -541,9 +541,9 @@ def _send_message_error_envelope(thread_id: str, exc: BaseException) -> dict[str
     envelope["recovery_hint"] = (
         "Transient failure — the thread is still alive on the platform. "
         "Surface the error to the user and ask whether to retry. On yes, "
-        "call evals_send_message AGAIN with the SAME thread_id and message. "
-        "Do NOT call evals_start_evaluator (would create a new thread, "
-        "orphaning this one) or evals_search_evaluators (restarts the flow "
+        "call send_message AGAIN with the SAME thread_id and message. "
+        "Do NOT call start_evaluator (would create a new thread, "
+        "orphaning this one) or search_evaluators (restarts the flow "
         "from the top and re-fires every subsequent tool)."
     )
     return envelope
@@ -553,8 +553,8 @@ def _start_evaluator_error_envelope(exc: BaseException) -> dict[str, Any]:
     envelope: dict[str, Any] = dict(format_tool_error(exc))
     envelope["recovery_hint"] = (
         "Surface the error to the user and ask whether to retry. On yes, "
-        "call evals_start_evaluator again with the SAME task_description. "
-        "Do NOT loop back through evals_search_evaluators — the user "
+        "call start_evaluator again with the SAME task_description. "
+        "Do NOT loop back through search_evaluators — the user "
         "already chose to create new."
     )
     return envelope
@@ -565,7 +565,7 @@ def _start_evaluator_error_envelope(exc: BaseException) -> dict[str, Any]:
 
 def register(mcp: FastMCP) -> None:
     @mcp.tool(
-        name="evals_start_evaluator",
+        name="start_evaluator",
         description=(
             "Start building an LLM-as-a-judge evaluator: creates a thread, sends the task "
             "to the Plurai agent, and returns refinement questions. This MUST be your first "
@@ -578,7 +578,7 @@ def register(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
-    async def evals_start_evaluator(
+    async def start_evaluator(
         args: StartEvaluatorArgs, ctx: Context[Any, Any, Any]
     ) -> dict[str, Any]:
         try:
@@ -590,17 +590,17 @@ def register(mcp: FastMCP) -> None:
             ValidationError,
             ValueError,
         ) as e:
-            logger.exception("evals_start_evaluator failed")
+            logger.exception("start_evaluator failed")
             return _start_evaluator_error_envelope(e)
 
     @mcp.tool(
-        name="evals_send_message",
+        name="send_message",
         description=(
-            "Send a follow-up message to the Plurai agent. Only use AFTER evals_start_evaluator. "
+            "Send a follow-up message to the Plurai agent. Only use AFTER start_evaluator. "
             "Used for sending user answers and for triggering optimization. "
             "To trigger optimization, send EXACTLY 'Optimize [LLM]' or 'Optimize [SLM]' "
             "(square brackets are literal). Optimization runs in the background — "
-            "call evals_get_results to retrieve results."
+            "call get_results to retrieve results."
         ),
         annotations=ToolAnnotations(
             readOnlyHint=False,
@@ -609,9 +609,7 @@ def register(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
-    async def evals_send_message(
-        args: SendMessageArgs, ctx: Context[Any, Any, Any]
-    ) -> dict[str, Any]:
+    async def send_message(args: SendMessageArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
         try:
             return await _send_message(args, ctx)
         except (
@@ -621,11 +619,11 @@ def register(mcp: FastMCP) -> None:
             ValidationError,
             ValueError,
         ) as e:
-            logger.exception("evals_send_message failed")
+            logger.exception("send_message failed")
             return _send_message_error_envelope(args.thread_id, e)
 
     @mcp.tool(
-        name="evals_ask_user",
+        name="ask_user",
         description=(
             "Present questions to the user via interactive form UI. Use this to ask refinement "
             "questions, optimization choices, or any decision that needs user input. Each "
@@ -638,8 +636,8 @@ def register(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
-    async def evals_ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
+    async def ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
         return await _ask_user(args, ctx)
 
     # Avoid unused-name warnings under strict linters.
-    _ = (evals_start_evaluator, evals_send_message, evals_ask_user)
+    _ = (start_evaluator, send_message, ask_user)

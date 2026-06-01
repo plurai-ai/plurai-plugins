@@ -122,7 +122,7 @@ def test_format_tool_error_returns_login_prompt_for_corrupt_credentials() -> Non
 def test_send_message_error_envelope_carries_thread_id_and_retry_hint() -> None:
     """On a 5xx mid-flow, the envelope MUST carry the thread_id and a
     recovery_hint that explicitly steers the orchestrator away from
-    evals_start_evaluator. Without these, the orchestrator's default
+    start_evaluator. Without these, the orchestrator's default
     fallback is to restart from the top — which creates a new thread and
     re-fires the whole tool flow (the reported "shoots all tools again"
     symptom)."""
@@ -134,13 +134,13 @@ def test_send_message_error_envelope_carries_thread_id_and_retry_hint() -> None:
 
     assert out["thread_id"] == "thr-1"
     assert "HTTP 500" in out["error"]
-    assert "Do NOT call evals_start_evaluator" in out["recovery_hint"]
+    assert "Do NOT call start_evaluator" in out["recovery_hint"]
     assert "SAME thread_id" in out["recovery_hint"]
 
 
 def test_start_evaluator_error_envelope_carries_retry_hint() -> None:
     """Symmetric to send_message: a 5xx during start_evaluator must NOT
-    push the orchestrator to retry via evals_search_evaluators (the user
+    push the orchestrator to retry via search_evaluators (the user
     already chose to create new). The hint pins this."""
     request = httpx.Request("POST", "https://app.plurai.ai/threads")
     response = httpx.Response(500, content=b"backend boom", request=request)
@@ -149,7 +149,7 @@ def test_start_evaluator_error_envelope_carries_retry_hint() -> None:
     out = _start_evaluator_error_envelope(err)
 
     assert "HTTP 500" in out["error"]
-    assert "Do NOT loop back through evals_search_evaluators" in out["recovery_hint"]
+    assert "Do NOT loop back through search_evaluators" in out["recovery_hint"]
     assert "SAME task_description" in out["recovery_hint"]
 
 
@@ -176,7 +176,7 @@ async def test_optimize_returns_classifier_id_for_round_trip(
     httpx_mock: Any, langgraph_client: FakeLangGraphClient, ctx: Any
 ) -> None:
     """The optimize response must echo classifier_id so the orchestrator can
-    pass it back to evals_get_results on each wake-up — that round-trip is
+    pass it back to get_results on each wake-up — that round-trip is
     the only durable handoff (the MCP server is stateless across restarts)."""
     state = ctx.request_context.lifespan_context
     langgraph_client.set_frames([_state_event({"classifier_id": "cls-abc"})])
@@ -201,7 +201,7 @@ async def test_optimize_returns_classifier_id_for_round_trip(
     # drift have no other prompt at this moment, and the field is what stops
     # them firing stray send_message/ask_user calls during the 2-20min run.
     assert "ScheduleWakeup" in out["instructions"]
-    assert "evals_get_results" in out["instructions"]
+    assert "get_results" in out["instructions"]
     assert "END this turn" in out["instructions"]
 
 
@@ -269,7 +269,7 @@ async def test_optimize_ignores_background_error_after_classifier_emits(
     """Once classifier_id has surfaced the foreground returns a useful
     payload; a later background failure (server-side optimization can run
     for ~20 min and may drop) must not retroactively raise — the user
-    can poll via ``evals_get_results``.
+    can poll via ``get_results``.
     """
     state = ctx.request_context.lifespan_context
     langgraph_client.set_frames(
@@ -472,10 +472,10 @@ async def test_optimize_replays_captured_error(
 async def test_send_message_blocked_during_in_flight_optimize(ctx: Any) -> None:
     """The kickoff returns once classifier_id surfaces, but the background
     agent run continues for the rest of the optimization (~20 min for SLM).
-    A stray ``evals_send_message`` during that window — confirmed in the
+    A stray ``send_message`` during that window — confirmed in the
     field as off-task "what else can you do?" chat — lands on the live
     thread and derails optimization. The guard MUST reject it with a
-    recovery_hint that routes the orchestrator back to evals_get_results."""
+    recovery_hint that routes the orchestrator back to get_results."""
     from evals_mcp.state import OptimizeRun
 
     state = ctx.request_context.lifespan_context
@@ -499,7 +499,7 @@ async def test_send_message_blocked_during_in_flight_optimize(ctx: Any) -> None:
         assert "error" in out
         assert "in progress" in out["error"]
         assert "cls-x" in out["error"]
-        assert out["recovery_hint"] == "evals_get_results"
+        assert out["recovery_hint"] == "get_results"
     finally:
         hang.set()
         with contextlib.suppress(Exception):
@@ -572,7 +572,7 @@ async def test_get_results_instructions_branch_on_pending_vs_done(
     )
     assert isinstance(pending, dict)
     assert "still running" in pending["instructions"]
-    assert "evals_get_results" in pending["instructions"]
+    assert "get_results" in pending["instructions"]
     assert "END this turn" in pending["instructions"]
 
     # Pending markdown must NOT render a table of em-dashes that looks like
@@ -733,7 +733,7 @@ async def test_search_evaluators_arms_ask_user_gate_when_matches_exist(
     httpx_mock: Any, ctx: Any
 ) -> None:
     """When matching evaluators are returned, the model needs to call
-    evals_ask_user to ask reuse-vs-create-new. Search must arm has_questions
+    ask_user to ask reuse-vs-create-new. Search must arm has_questions
     so that ask_user passes its gate."""
     items = [
         {
@@ -874,7 +874,7 @@ async def test_start_evaluator_happy_path(
     assert out["agent_response"] == "What labels?"
     assert "platform_constraint" in out
     assert "FROZEN" in out["platform_constraint"]
-    assert "evals_start_evaluator" in out["platform_constraint"]
+    assert "start_evaluator" in out["platform_constraint"]
     assert ctx.request_context.lifespan_context.has_questions is True
     assert ctx.request_context.lifespan_context.committed is False
 
@@ -1039,7 +1039,7 @@ async def test_send_message_surfaces_url_when_commit_id_present(
     # choice in the same turn — no separate review-confirmation gate. The
     # gate policy itself lives in the eval skill / command docs, not here.
     assert "review/edit" in instructions
-    assert "evals_ask_user" in instructions
+    assert "ask_user" in instructions
     assert "UI experience" in instructions
     assert "Ready to optimize" not in instructions
     assert "review-confirm" not in instructions.lower()
@@ -1048,7 +1048,7 @@ async def test_send_message_surfaces_url_when_commit_id_present(
     # sample-only edit.
     assert "platform_constraint" in out
     assert "FROZEN" in out["platform_constraint"]
-    assert "evals_start_evaluator" in out["platform_constraint"]
+    assert "start_evaluator" in out["platform_constraint"]
     assert state.committed is True
     # Entitled user: backstop must NOT block subsequent Optimize [SLM].
     assert state.slm_allowed is True
@@ -1236,9 +1236,9 @@ async def test_send_message_no_url_when_no_commit_id(
     # branch must not leak it.
     assert "platform_constraint" not in out
     # Pre-commit branch now carries WHO-answers guidance — pin the contract
-    # by name (evals_ask_user) without freezing the wording.
+    # by name (ask_user) without freezing the wording.
     assert "instructions" in out
-    assert "evals_ask_user" in out["instructions"]
+    assert "ask_user" in out["instructions"]
     assert state.committed is False
     # Refinement question detected → has_questions re-armed via the '?' branch.
     assert state.has_questions is True

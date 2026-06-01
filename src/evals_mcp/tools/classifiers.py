@@ -47,7 +47,7 @@ class GetResultsArgs(BaseModel):
         Field(
             min_length=1,
             description=(
-                "Classifier ID from the prior evals_send_message Optimize response. "
+                "Classifier ID from the prior send_message Optimize response. "
                 "The MCP server is stateless across subprocess restarts; the "
                 "orchestrator's conversation context is the durable handoff."
             ),
@@ -212,7 +212,7 @@ async def _search_evaluators(args: SearchEvaluatorsArgs, ctx: Context[Any, Any, 
         "instructions": (
             "These are the user's existing evaluators in their Plurai workspace. "
             "If one matches their task, show them the full list and ask (via "
-            "evals_ask_user) whether to reuse it or create a new one. If the list "
+            "ask_user) whether to reuse it or create a new one. If the list "
             "is empty, say nothing — just proceed to create a new evaluator. Never "
             "tell the user a search 'failed' or that 'no evaluator exists' — there "
             "is no shared library, only their personal collection."
@@ -254,8 +254,8 @@ async def _get_results(args: GetResultsArgs, ctx: Context[Any, Any, Any]) -> Any
         "instructions": (
             "Optimization still running. Schedule another wake-up via "
             "ScheduleWakeup (60s LLM, 300s SLM) and END this turn. Do NOT "
-            "call evals_send_message or any other tool — only re-poll via "
-            "evals_get_results on the next wake-up."
+            "call send_message or any other tool — only re-poll via "
+            "get_results on the next wake-up."
             if pending
             else (
                 "Results landed. Surface baseline vs optimized metrics to "
@@ -289,7 +289,7 @@ async def _get_api_key(args: GetApiKeyArgs, ctx: Context[Any, Any, Any]) -> dict
 
 def register(mcp: FastMCP) -> None:
     @mcp.tool(
-        name="evals_search_evaluators",
+        name="search_evaluators",
         description=(
             "List the user's existing evaluators in their Plurai workspace. Call this as an "
             "optimization before creating a new one — if a matching evaluator already exists "
@@ -304,16 +304,14 @@ def register(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
-    async def evals_search_evaluators(
-        args: SearchEvaluatorsArgs, ctx: Context[Any, Any, Any]
-    ) -> Any:
+    async def search_evaluators(args: SearchEvaluatorsArgs, ctx: Context[Any, Any, Any]) -> Any:
         try:
             return await _search_evaluators(args, ctx)
         except Exception as e:
             return format_tool_error(e)
 
     @mcp.tool(
-        name="evals_get_results",
+        name="get_results",
         description=(
             "Fetch optimization results (accuracy, precision, recall) and endpoint URL. "
             "Pass classifier_id from the prior Optimize response. Returns null "
@@ -327,14 +325,14 @@ def register(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
-    async def evals_get_results(args: GetResultsArgs, ctx: Context[Any, Any, Any]) -> Any:
+    async def get_results(args: GetResultsArgs, ctx: Context[Any, Any, Any]) -> Any:
         try:
             return await _get_results(args, ctx)
         except Exception as e:
             return format_tool_error(e)
 
     @mcp.tool(
-        name="evals_get_api_key",
+        name="get_api_key",
         description=(
             "Return the user's stored Plurai API key for embedding in the "
             "integration snippet. Reads from local credentials configured by "
@@ -348,10 +346,10 @@ def register(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
-    async def evals_get_api_key(args: GetApiKeyArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
+    async def get_api_key(args: GetApiKeyArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
         try:
             return await _get_api_key(args, ctx)
         except Exception as e:
             return format_tool_error(e)
 
-    _ = (evals_search_evaluators, evals_get_results, evals_get_api_key)
+    _ = (search_evaluators, get_results, get_api_key)

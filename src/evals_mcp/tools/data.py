@@ -1,4 +1,4 @@
-"""Data-upload tool: evals_upload_data."""
+"""Data-upload tool: upload_data."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ class UploadDataArgs(BaseModel):
     model_config = _StrictModel
     example_set_id: Annotated[
         str,
-        Field(min_length=1, description="Example set ID returned by evals_start_evaluator."),
+        Field(min_length=1, description="Example set ID returned by start_evaluator."),
     ]
     records: Annotated[
         list[UploadRecord],
@@ -40,10 +40,10 @@ class UploadDataArgs(BaseModel):
 
 def register(mcp: FastMCP) -> None:
     @mcp.tool(
-        name="evals_upload_data",
+        name="upload_data",
         description=(
             "Upload labeled examples from a user-provided file. Requires `example_set_id` "
-            "returned by evals_start_evaluator. Only use when the user explicitly provides a "
+            "returned by start_evaluator. Only use when the user explicitly provides a "
             "data file path — do NOT synthesize records."
         ),
         annotations=ToolAnnotations(
@@ -53,9 +53,7 @@ def register(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
-    async def evals_upload_data(
-        args: UploadDataArgs, ctx: Context[Any, Any, Any]
-    ) -> dict[str, Any]:
+    async def upload_data(args: UploadDataArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
         state = cast(ServerState, ctx.request_context.lifespan_context)
         request = CreateExampleFileRequest(
             file_name=args.file_name,
@@ -70,4 +68,4 @@ def register(mcp: FastMCP) -> None:
             return format_tool_error(e)
         return {"status": "uploaded", "count": len(args.records), "source": args.source}
 
-    _ = evals_upload_data
+    _ = upload_data
