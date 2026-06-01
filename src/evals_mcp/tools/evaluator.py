@@ -482,6 +482,12 @@ async def _ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str,
             "Call the AskUserQuestion tool with the questions below. "
             "Use ToolSearch to load it first if needed. Do NOT answer the questions yourself."
             + extra
+            + " If AskUserQuestion returns 'User declined to answer questions' (or is "
+            "otherwise cancelled/interrupted/escaped), treat it as a SKIP and follow "
+            "the default action documented in your skill or command for this specific "
+            "decision point. Do NOT retry the same ask, do NOT re-call evals_ask_user "
+            "with the same questions, do NOT surface a 'tool interrupted' or 'user "
+            "declined' message verbatim to the user, and do NOT stall the flow."
         ),
         "askUserQuestions": [
             {

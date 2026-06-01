@@ -36,6 +36,12 @@ At every decision point in the flow (refinement questions, model choice, integra
 
 When ambiguous, ask. User-facing questions ALWAYS go through `evals_ask_user` — never invent a plain-text Q&A turn.
 
+**Skip handling (refinement only).** Treat the host's `AskUserQuestion` as a *partial* form: the user may submit having answered only some tabs, or escape/decline the whole thing.
+- For any refinement question that **has a user answer in the response**: use that answer when composing `evals_send_message`.
+- For any refinement question with **no user answer** (omitted from `answers`, or the whole response is `"User declined to answer questions"`/interrupted): fill it yourself with the orchestrator's own pick using sensible defaults.
+
+Then send a single `evals_send_message` composing the merged answers and continue the normal post-refinement flow. Do NOT retry the ask, do NOT re-prompt the user for the missing questions, do NOT surface the interruption text verbatim, do NOT stall.
+
 **Surfacing progress to the user.** After every `evals_send_message`, show the user the `agent_response` text verbatim so they see what the platform is doing (e.g. "I've generated 16 synthetic examples..."). Whenever a response includes `url`, you MUST display it to the user as a clickable markdown link in that turn — never silently move on.
 
 After the refinement round (whether the user answered via `evals_ask_user` or you self-answered via `evals_send_message`):
