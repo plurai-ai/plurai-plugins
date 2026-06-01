@@ -268,10 +268,15 @@ async def _handle_optimize(
     if normalized == "optimize [slm]" and not state.slm_allowed:
         return {
             "error": (
-                "SLM optimization requires a paid Plurai plan. Upgrade at "
+                "SLM vibe-training requires a paid Plurai plan. Upgrade at "
                 f"{settings.api_base.rstrip('/')}/settings?tab=subscription-billing, "
-                "then retry. To run now, send 'Optimize [LLM]' instead."
-            )
+                "then retry. To run now, pick the Optimized LLM option instead."
+            ),
+            "recovery_hint": (
+                "Re-ask the model choice via evals_ask_user using the upgrade-gated "
+                "variant from the eval skill. If the user picks 'Continue with "
+                "Optimized LLM', send 'Optimize [LLM]'."
+            ),
         }
     classifier_id = await _start_optimize_and_await_classifier(
         state, thread_id, message, settings.classifier_wait_timeout_s

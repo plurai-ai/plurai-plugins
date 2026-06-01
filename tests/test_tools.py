@@ -1147,7 +1147,12 @@ async def test_handle_optimize_blocks_slm_when_state_blocked(ctx: Any) -> None:
     assert "error" in out
     assert "paid Plurai plan" in out["error"]
     assert "settings?tab=subscription-billing" in out["error"]
-    assert "Optimize [LLM]" in out["error"]
+    assert "vibe-training" in out["error"]
+    assert "Optimized LLM option" in out["error"]
+    # The protocol command must not leak into the user-facing error text.
+    assert "Optimize [LLM]" not in out["error"]
+    # Orchestrator routing carries the protocol string.
+    assert "Optimize [LLM]" in out["recovery_hint"]
 
 
 @pytest.mark.asyncio
