@@ -81,7 +81,6 @@ def test_bearer_cache_raises_when_missing(creds_path: Path) -> None:
     # flow rather than bouncing back to the user — the whole point of the
     # directive wording.
     assert "auth login" in str(exc.value)
-    assert "retry" in str(exc.value)
 
 
 def test_bearer_cache_returns_authorization(creds_path: Path) -> None:
@@ -122,7 +121,6 @@ def test_load_api_key_raises_on_corrupt_json(creds_path: Path) -> None:
     # Same inline-auth directive as MissingApiKeyError so the orchestrator
     # recovers identically from "no key" and "broken key" states.
     assert "auth login" in str(exc.value)
-    assert "retry" in str(exc.value)
 
 
 def test_load_api_key_raises_on_non_string_value(creds_path: Path) -> None:

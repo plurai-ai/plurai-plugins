@@ -5,7 +5,6 @@ from .base import BaseHttpClient, BaseHttpClientConfig, HeadersProvider
 from .models import (
     ClassifierDefaultVersionView,
     ClassifierSummaryView,
-    CreateApiKeyResponse,
     CreateExampleFileRequest,
     CreateExampleFileResponse,
     ExampleRecordInput,
@@ -13,6 +12,8 @@ from .models import (
     ListClassifiersResponse,
     MetricsView,
     OptimizationView,
+    PlanEntitlements,
+    PlanResponse,
     ThreadView,
 )
 from .platform import PlatformClient
@@ -23,7 +24,6 @@ __all__ = [
     "BaseHttpClientConfig",
     "ClassifierDefaultVersionView",
     "ClassifierSummaryView",
-    "CreateApiKeyResponse",
     "CreateExampleFileRequest",
     "CreateExampleFileResponse",
     "ExampleRecordInput",
@@ -32,6 +32,8 @@ __all__ = [
     "ListClassifiersResponse",
     "MetricsView",
     "OptimizationView",
+    "PlanEntitlements",
+    "PlanResponse",
     "PlatformClient",
     "ThreadStateView",
     "ThreadView",

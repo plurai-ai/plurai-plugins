@@ -67,5 +67,5 @@ def _configure_logging() -> None:
 
 _configure_logging()
 
-mcp: FastMCP = FastMCP("evals", lifespan=lifespan)
+mcp: FastMCP = FastMCP("plurai", lifespan=lifespan)
 register_all(mcp)

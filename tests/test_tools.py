@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 from typing import Any
@@ -14,8 +15,11 @@ from evals_mcp.clients.agent import _INTERMEDIATE_STATE_EVENT_NAME
 from evals_mcp.config import get_settings
 from evals_mcp.errors import format_tool_error, safe_error_body
 from evals_mcp.tools.classifiers import (
+    GetApiKeyArgs,
     GetResultsArgs,
     SearchEvaluatorsArgs,
+    _format_search_markdown,
+    _get_api_key,
     _get_results,
     _search_evaluators,
 )
@@ -27,7 +31,9 @@ from evals_mcp.tools.evaluator import (
     StartEvaluatorArgs,
     _ask_user,
     _send_message,
+    _send_message_error_envelope,
     _start_evaluator,
+    _start_evaluator_error_envelope,
 )
 
 from .conftest import FakeLangGraphClient, FakeStreamPart
@@ -114,6 +120,39 @@ def test_format_tool_error_returns_login_prompt_for_corrupt_credentials() -> Non
     assert "invalid JSON" in out["error"]
 
 
+def test_send_message_error_envelope_carries_thread_id_and_retry_hint() -> None:
+    """On a 5xx mid-flow, the envelope MUST carry the thread_id and a
+    recovery_hint that explicitly steers the orchestrator away from
+    start_evaluator. Without these, the orchestrator's default
+    fallback is to restart from the top — which creates a new thread and
+    re-fires the whole tool flow."""
+    request = httpx.Request("POST", "https://run.plurai.ai/threads/x/runs/stream")
+    response = httpx.Response(500, content=b"backend boom", request=request)
+    err = httpx.HTTPStatusError("e", request=request, response=response)
+
+    out = _send_message_error_envelope("thr-1", err)
+
+    assert out["thread_id"] == "thr-1"
+    assert "HTTP 500" in out["error"]
+    assert "Do NOT call start_evaluator" in out["recovery_hint"]
+    assert "SAME thread_id" in out["recovery_hint"]
+
+
+def test_start_evaluator_error_envelope_carries_retry_hint() -> None:
+    """Symmetric to send_message: a 5xx during start_evaluator must NOT
+    push the orchestrator to retry via search_evaluators (the user
+    already chose to create new). The hint pins this."""
+    request = httpx.Request("POST", "https://app.plurai.ai/threads")
+    response = httpx.Response(500, content=b"backend boom", request=request)
+    err = httpx.HTTPStatusError("e", request=request, response=response)
+
+    out = _start_evaluator_error_envelope(err)
+
+    assert "HTTP 500" in out["error"]
+    assert "Do NOT loop back through search_evaluators" in out["recovery_hint"]
+    assert "SAME task_description" in out["recovery_hint"]
+
+
 # ── Send-message guards ──────────────────────────────────────────────────
 
 
@@ -137,7 +176,7 @@ async def test_optimize_returns_classifier_id_for_round_trip(
     httpx_mock: Any, langgraph_client: FakeLangGraphClient, ctx: Any
 ) -> None:
     """The optimize response must echo classifier_id so the orchestrator can
-    pass it back to evals_get_results on each wake-up — that round-trip is
+    pass it back to get_results on each wake-up — that round-trip is
     the only durable handoff (the MCP server is stateless across restarts)."""
     state = ctx.request_context.lifespan_context
     langgraph_client.set_frames([_state_event({"classifier_id": "cls-abc"})])
@@ -158,6 +197,12 @@ async def test_optimize_returns_classifier_id_for_round_trip(
     assert out["slug"] == "my-eval"
     assert out["version"] == "1.0.0"
     assert "/ioa/v1/my-eval/1.0.0" in out["endpoint_url"]
+    # The kickoff must self-describe the wait contract: orchestrators that
+    # drift have no other prompt at this moment, and the field is what stops
+    # them firing stray send_message/ask_user calls during the 2-20min run.
+    assert "ScheduleWakeup" in out["instructions"]
+    assert "get_results" in out["instructions"]
+    assert "END this turn" in out["instructions"]
 
 
 @pytest.mark.asyncio
@@ -224,7 +269,7 @@ async def test_optimize_ignores_background_error_after_classifier_emits(
     """Once classifier_id has surfaced the foreground returns a useful
     payload; a later background failure (server-side optimization can run
     for ~20 min and may drop) must not retroactively raise — the user
-    can poll via ``evals_get_results``.
+    can poll via ``get_results``.
     """
     state = ctx.request_context.lifespan_context
     langgraph_client.set_frames(
@@ -272,12 +317,384 @@ async def test_optimize_raises_when_classifier_never_emitted(
 
     # _send_message raises RuntimeError; the registered tool wrapper would
     # convert that to a {"error": ...} envelope via format_tool_error.
-    with pytest.raises(RuntimeError, match="no classifier_id emitted"):
+    with pytest.raises(RuntimeError, match="terminated without emitting"):
         await _send_message(
             SendMessageArgs(thread_id="thr-1", message="Optimize [LLM]"),
             ctx,
         )
     await _drain_background(state)
+
+
+# ── One-run-per-thread invariant ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_optimize_runs_at_most_once_per_thread(
+    monkeypatch: Any, langgraph_client: FakeLangGraphClient, ctx: Any
+) -> None:
+    """The orchestrator's natural response to a 'classifier_id not surfaced
+    yet' envelope (common under batch load) is to retry with the same
+    Optimize message. The server MUST treat that retry as a resume of the
+    existing background run, not a kick that starts a second run_agent —
+    that would create parallel background runs on the same thread.
+    """
+    state = ctx.request_context.lifespan_context
+    _ = langgraph_client  # fixture activates the fake SDK client
+
+    hang_until = asyncio.Event()
+    call_count = 0
+
+    async def hanging_run_agent(thread_id: str, message: str, *, on_state: Any = None) -> None:
+        nonlocal call_count
+        call_count += 1
+        await hang_until.wait()
+
+    monkeypatch.setattr(state.agent, "run_agent", hanging_run_agent)
+    monkeypatch.setattr(get_settings(), "classifier_wait_timeout_s", 0.05)
+
+    for _ in range(3):
+        out = await _send_message(
+            SendMessageArgs(thread_id="thr-batch", message="Optimize [LLM]"),
+            ctx,
+        )
+        assert "error" in out
+        assert "still running in the background" in out["error"]
+
+    assert call_count == 1, (
+        "run_agent must fire at most once per thread — retries resume the "
+        "existing run instead of starting parallel background runs."
+    )
+
+    # Release the hanging task so background drain can complete.
+    hang_until.set()
+    await _drain_background(state)
+
+
+@pytest.mark.asyncio
+async def test_optimize_resumes_with_captured_id(
+    httpx_mock: Any, monkeypatch: Any, langgraph_client: FakeLangGraphClient, ctx: Any
+) -> None:
+    """When classifier_id surfaces AFTER the first call's wait budget but
+    BEFORE the orchestrator's retry, the retry must return the captured ID
+    immediately without invoking run_agent again."""
+    from evals_mcp.clients import ThreadStateView
+
+    state = ctx.request_context.lifespan_context
+    _ = langgraph_client
+
+    emit = asyncio.Event()
+    call_count = 0
+
+    async def slow_emit(thread_id: str, message: str, *, on_state: Any = None) -> None:
+        nonlocal call_count
+        call_count += 1
+        await emit.wait()
+        if on_state is not None:
+            on_state(ThreadStateView(classifier_id="cls-late", commit_id=None, messages=[]))
+
+    monkeypatch.setattr(state.agent, "run_agent", slow_emit)
+    monkeypatch.setattr(get_settings(), "classifier_wait_timeout_s", 0.05)
+
+    out1 = await _send_message(
+        SendMessageArgs(thread_id="thr-resume", message="Optimize [LLM]"),
+        ctx,
+    )
+    assert "error" in out1
+    assert "still running in the background" in out1["error"]
+
+    # Simulate classifier_id surfacing between calls.
+    emit.set()
+    await asyncio.sleep(0)  # let slow_emit's continuation run
+    # Wait for the background task to fully finish so captured_id is settled.
+    run = state.optimize_runs["thr-resume"]
+    await run.task
+
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/cls-late",
+        method="GET",
+        json={"id": "cls-late", "slug": "my-eval", "defaultVersion": {"number": "1.0.0"}},
+    )
+
+    out2 = await _send_message(
+        SendMessageArgs(thread_id="thr-resume", message="Optimize [LLM]"),
+        ctx,
+    )
+
+    assert out2["status"] == "optimization_started"
+    assert out2["classifier_id"] == "cls-late"
+    assert call_count == 1, "resume must not re-fire run_agent"
+
+    await _drain_background(state)
+
+
+@pytest.mark.asyncio
+async def test_optimize_retries_fresh_after_preclassifier_failure(
+    httpx_mock: Any, monkeypatch: Any, langgraph_client: FakeLangGraphClient, ctx: Any
+) -> None:
+    """A run that dies BEFORE emitting a classifier_id protects no server-side
+    state, so the next explicit retry must DROP the dead entry and start a
+    fresh run — not replay the cached error forever (which no retry could
+    clear, looping the orchestrator on the transient-retry hint). Here the
+    first attempt fails with a missing key; after the user re-authenticates,
+    the retry starts a fresh run and succeeds — recovery that replay-forever
+    made impossible.
+    """
+    from evals_mcp.clients import ThreadStateView
+    from evals_mcp.errors import MissingApiKeyError
+
+    state = ctx.request_context.lifespan_context
+    _ = langgraph_client
+
+    call_count = 0
+    key_present = False
+
+    async def run_agent(thread_id: str, message: str, *, on_state: Any = None) -> None:
+        nonlocal call_count
+        call_count += 1
+        if not key_present:
+            raise MissingApiKeyError()
+        if on_state is not None:
+            on_state(ThreadStateView(classifier_id="cls-recovered", commit_id=None, messages=[]))
+
+    monkeypatch.setattr(state.agent, "run_agent", run_agent)
+    monkeypatch.setattr(get_settings(), "classifier_wait_timeout_s", 30.0)
+
+    # First attempt: no key → surface MissingApiKeyError so the inline auth
+    # flow can fire.
+    with pytest.raises(MissingApiKeyError):
+        await _send_message(
+            SendMessageArgs(thread_id="thr-err", message="Optimize [LLM]"),
+            ctx,
+        )
+    await _drain_background(state)
+    assert call_count == 1
+    # The dead entry persists until the retry that drops it.
+    assert state.optimize_runs["thr-err"].captured_error is not None
+    assert state.optimize_runs["thr-err"].captured_id is None
+
+    # User re-authenticates; the retry must start a FRESH run, not replay.
+    key_present = True
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/cls-recovered",
+        method="GET",
+        json={"id": "cls-recovered", "slug": "ev", "defaultVersion": {"number": "1.0.0"}},
+    )
+    out = await _send_message(
+        SendMessageArgs(thread_id="thr-err", message="Optimize [LLM]"),
+        ctx,
+    )
+    await _drain_background(state)
+
+    assert out["status"] == "optimization_started"
+    assert out["classifier_id"] == "cls-recovered"
+    assert call_count == 2, "a dead pre-classifier run is retried fresh, not replayed"
+
+
+@pytest.mark.asyncio
+async def test_optimize_isolates_concurrent_runs_across_threads(
+    httpx_mock: Any, monkeypatch: Any, langgraph_client: FakeLangGraphClient, ctx: Any
+) -> None:
+    """The 'several optimizers running' scenario: two threads optimizing at
+    once must each get their OWN OptimizeRun. While thr-a's run is still in
+    flight, thr-b's classifier_id must surface independently — neither run's
+    captured_id may leak into the other. Guards the per-thread keying against
+    a regression to a shared/singleton run record.
+    """
+    from evals_mcp.clients import ThreadStateView
+
+    state = ctx.request_context.lifespan_context
+    _ = langgraph_client
+
+    release_a = asyncio.Event()
+
+    async def run_agent(thread_id: str, message: str, *, on_state: Any = None) -> None:
+        if thread_id == "thr-a":
+            await release_a.wait()  # stay in flight for the duration of the test
+            return
+        if on_state is not None:
+            on_state(ThreadStateView(classifier_id="cls-b", commit_id=None, messages=[]))
+
+    monkeypatch.setattr(state.agent, "run_agent", run_agent)
+    monkeypatch.setattr(get_settings(), "classifier_wait_timeout_s", 0.05)
+
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/cls-b",
+        method="GET",
+        json={"id": "cls-b", "slug": "b-eval", "defaultVersion": {"number": "1.0.0"}},
+    )
+
+    # thr-a kicks off and stays in flight — its id never surfaces within budget.
+    out_a = await _send_message(SendMessageArgs(thread_id="thr-a", message="Optimize [LLM]"), ctx)
+    assert "error" in out_a
+    assert "still running in the background" in out_a["error"]
+
+    # thr-b optimizes concurrently and resolves to ITS OWN classifier_id while
+    # thr-a's background run is still open.
+    out_b = await _send_message(SendMessageArgs(thread_id="thr-b", message="Optimize [LLM]"), ctx)
+    assert out_b["status"] == "optimization_started"
+    assert out_b["classifier_id"] == "cls-b"
+
+    # Two independent records; thr-a's in-flight run is untouched by thr-b.
+    run_a = state.optimize_runs["thr-a"]
+    run_b = state.optimize_runs["thr-b"]
+    assert run_a is not run_b
+    assert run_a.captured_id is None
+    assert not run_a.task.done()
+    assert run_b.captured_id == "cls-b"
+
+    release_a.set()
+    await _drain_background(state)
+
+
+@pytest.mark.asyncio
+async def test_send_message_blocked_during_in_flight_optimize(ctx: Any) -> None:
+    """The kickoff returns once classifier_id surfaces, but the background
+    agent run continues for the rest of the optimization (~20 min for SLM).
+    A stray ``send_message`` during that window — confirmed in the
+    field as off-task "what else can you do?" chat — lands on the live
+    thread and derails optimization. The guard MUST reject it with a
+    recovery_hint that routes the orchestrator back to get_results."""
+    from evals_mcp.state import OptimizeRun
+
+    state = ctx.request_context.lifespan_context
+
+    hang = asyncio.Event()
+
+    async def _hang() -> None:
+        await hang.wait()
+
+    task = asyncio.create_task(_hang())
+    try:
+        state.optimize_runs["thr-busy"] = OptimizeRun(
+            task=task, event=asyncio.Event(), captured_id="cls-x"
+        )
+
+        out = await _send_message(
+            SendMessageArgs(thread_id="thr-busy", message="What else can you do?"),
+            ctx,
+        )
+
+        assert "error" in out
+        assert "in progress" in out["error"]
+        assert "cls-x" in out["error"]
+        assert out["recovery_hint"] == "get_results"
+    finally:
+        hang.set()
+        with contextlib.suppress(Exception):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_send_message_unblocked_after_optimize_completes(
+    langgraph_client: FakeLangGraphClient, ctx: Any
+) -> None:
+    """``optimize_runs`` entries persist for the server's lifetime — the
+    guard must read ``task.done()`` rather than just key existence,
+    otherwise it would block forever after the first optimize on a thread."""
+    from evals_mcp.state import OptimizeRun
+
+    state = ctx.request_context.lifespan_context
+
+    async def _done() -> None:
+        return
+
+    task = asyncio.create_task(_done())
+    await task  # ensure it's terminal before the guard reads task.done()
+    state.optimize_runs["thr-finished"] = OptimizeRun(
+        task=task, event=asyncio.Event(), captured_id="cls-y"
+    )
+
+    # Configure the agent fake so the normal send_message path returns a
+    # benign agent_response — the test cares that the guard didn't fire,
+    # not what the agent said.
+    langgraph_client.set_frames([_state_event({"messages": []})])
+
+    out = await _send_message(
+        SendMessageArgs(thread_id="thr-finished", message="add one more sample"),
+        ctx,
+    )
+
+    # Guard would have returned {"error": ..., "recovery_hint": ...}; the
+    # regular path returns agent_response + message_count.
+    assert "agent_response" in out
+    assert "message_count" in out
+    assert "recovery_hint" not in out
+
+
+@pytest.mark.asyncio
+async def test_get_results_instructions_branch_on_pending_vs_done(
+    httpx_mock: Any, ctx: Any
+) -> None:
+    """The response's ``instructions`` field is what stops the orchestrator
+    drifting during the polling wait. Pending must say "still running",
+    done must say "results landed" — without these the model invents
+    activity (seen in the field as a premature integration-language ask)."""
+    # Pending case.
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/c-pending",
+        method="GET",
+        json={"slug": "s-pending", "defaultVersion": {"number": "1.0.0"}},
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/c-pending/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/s-pending/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+    pending = await _get_results(
+        GetResultsArgs(classifier_id="c-pending", response_format="json"), ctx
+    )
+    assert isinstance(pending, dict)
+    assert "still running" in pending["instructions"]
+    assert "get_results" in pending["instructions"]
+    assert "END this turn" in pending["instructions"]
+
+    # Pending markdown must NOT render a table of em-dashes that looks like
+    # results were ready.
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/c-pending",
+        method="GET",
+        json={"slug": "s-pending", "defaultVersion": {"number": "1.0.0"}},
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/c-pending/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/s-pending/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+    pending_md = await _get_results(
+        GetResultsArgs(classifier_id="c-pending", response_format="markdown"), ctx
+    )
+    assert isinstance(pending_md, str)
+    assert "still running" in pending_md
+    assert "| baseline |" not in pending_md
+
+    # Done case.
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/c-done",
+        method="GET",
+        json={"slug": "s-done", "defaultVersion": {"number": "1.0.0"}},
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/c-done/versions/1.0.0/optimization",
+        method="GET",
+        json={
+            "baseline": {"accuracy": 0.6, "precision": 0.6, "recall": 0.6},
+            "optimized": {"accuracy": 0.9, "precision": 0.9, "recall": 0.9},
+        },
+    )
+    done = await _get_results(GetResultsArgs(classifier_id="c-done", response_format="json"), ctx)
+    assert isinstance(done, dict)
+    assert "Results landed" in done["instructions"]
+    assert "integration-language" in done["instructions"]
 
 
 @pytest.mark.asyncio
@@ -394,7 +811,7 @@ async def test_search_evaluators_arms_ask_user_gate_when_matches_exist(
     httpx_mock: Any, ctx: Any
 ) -> None:
     """When matching evaluators are returned, the model needs to call
-    evals_ask_user to ask reuse-vs-create-new. Search must arm has_questions
+    ask_user to ask reuse-vs-create-new. Search must arm has_questions
     so that ask_user passes its gate."""
     items = [
         {
@@ -460,6 +877,63 @@ async def test_search_evaluators_json_format(httpx_mock: Any, ctx: Any) -> None:
     assert payload["evaluators"][0]["has_optimization"] is False
 
 
+@pytest.mark.asyncio
+async def test_search_evaluators_degrades_when_a_probe_fails(httpx_mock: Any, ctx: Any) -> None:
+    """One classifier's optimization probe failing (post-retry 5xx) must NOT
+    collapse the entire listing. The failed row degrades to
+    has_optimization=None ('unknown'); every other row still renders."""
+    items = [
+        {"id": "ok", "slug": "ok-slug", "defaultVersion": {"number": "1.0.0"}},
+        {"id": "boom", "slug": "boom-slug", "defaultVersion": {"number": "1.0.0"}},
+    ]
+    httpx_mock.add_response(url=f"{PLATFORM_API}/classifiers", method="GET", json={"items": items})
+    # "ok": both probes 404 → not optimized.
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/ok/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/ok-slug/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+    # "boom": first probe 500 → raises (fixture has max_retries=0), probe fails.
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/boom/versions/1.0.0/optimization",
+        method="GET",
+        status_code=500,
+    )
+
+    payload = await _search_evaluators(
+        SearchEvaluatorsArgs(limit=25, offset=0, response_format="json"), ctx
+    )
+    assert isinstance(payload, dict)
+    # The whole listing survived — both rows present, not a single error envelope.
+    assert payload["count"] == 2
+    # Page order is preserved: row 0 is "ok" (probed cleanly), row 1 is "boom".
+    assert payload["evaluators"][0]["has_optimization"] is False
+    assert payload["evaluators"][1]["has_optimization"] is None  # unknown, not silently "no"
+
+
+def test_format_search_markdown_marks_unknown_probe() -> None:
+    """A probe that failed renders as 'unknown (probe failed)', never as '—'
+    (which would read as 'definitely not optimized')."""
+    row: dict[str, Any] = {
+        "id": "x",
+        "name": "X",
+        "slug": "x",
+        "labels": [],
+        "endpoint_url": "u",
+        "has_optimization": None,
+    }
+    assert "unknown" in _format_search_markdown([row], 1, 0)
+    row["has_optimization"] = False
+    assert "unknown" not in _format_search_markdown([row], 1, 0)
+    row["has_optimization"] = True
+    assert "optimized" in _format_search_markdown([row], 1, 0)
+
+
 # ── get_results: 404-on-both falls through to empty metrics ──────────────
 
 
@@ -486,6 +960,94 @@ async def test_get_results_returns_empty_metrics_when_no_optimization(
     assert isinstance(out, dict)
     assert out["baseline"] == {"accuracy": None, "precision": None, "recall": None}
     assert out["optimized"] == {"accuracy": None, "precision": None, "recall": None}
+
+
+async def _terminal_optimize_run(captured_id: str, error: BaseException | None) -> Any:
+    """Build a DONE OptimizeRun for direct insertion into state.optimize_runs."""
+    from evals_mcp.state import OptimizeRun
+
+    async def _noop() -> None:
+        return
+
+    task = asyncio.create_task(_noop())
+    await task  # ensure terminal before the lookup reads task.done()
+    return OptimizeRun(
+        task=task, event=asyncio.Event(), captured_id=captured_id, captured_error=error
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_results_surfaces_dead_background_run(httpx_mock: Any, ctx: Any) -> None:
+    """A background optimize that emitted classifier_id and then DIED (the
+    stream stays open ~20 min after the id surfaces) leaves the platform with
+    no results. Polling get_results must surface the captured cause as a
+    terminal failure — not loop forever on 'still running' while the error
+    sits unread in the OptimizeRun ledger."""
+    state = ctx.request_context.lifespan_context
+    state.optimize_runs["thr-dead"] = await _terminal_optimize_run(
+        "cls-dead", RuntimeError("background boom")
+    )
+
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/cls-dead",
+        method="GET",
+        json={"slug": "s-dead", "defaultVersion": {"number": "1.0.0"}},
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/cls-dead/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/s-dead/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+
+    out = await _get_results(GetResultsArgs(classifier_id="cls-dead", response_format="json"), ctx)
+    assert isinstance(out, dict)
+    assert "error" in out
+    assert "failed in the background" in out["error"]
+    assert "background boom" in out["error"]  # the captured cause is surfaced
+    assert out["classifier_id"] == "cls-dead"
+    assert out["thread_id"] == "thr-dead"
+    assert "recovery_hint" in out
+    # Must NOT tell the orchestrator to keep polling.
+    assert "still running" not in json.dumps(out)
+
+
+@pytest.mark.asyncio
+async def test_get_results_stays_pending_when_run_alive_but_metrics_lag(
+    httpx_mock: Any, ctx: Any
+) -> None:
+    """Guard against over-triggering the terminal-failure path: a run that
+    finished CLEANLY (captured_id set, NO captured_error) while the platform
+    is still computing metrics must still report 'still running' — not a
+    spurious failure."""
+    state = ctx.request_context.lifespan_context
+    state.optimize_runs["thr-ok"] = await _terminal_optimize_run("cls-ok", None)
+
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/cls-ok",
+        method="GET",
+        json={"slug": "s-ok", "defaultVersion": {"number": "1.0.0"}},
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/cls-ok/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/s-ok/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+
+    out = await _get_results(GetResultsArgs(classifier_id="cls-ok", response_format="json"), ctx)
+    assert isinstance(out, dict)
+    assert "error" not in out
+    assert "still running" in out["instructions"]
+    assert "failed in the background" not in json.dumps(out)
 
 
 @pytest.mark.asyncio
@@ -535,12 +1097,25 @@ async def test_start_evaluator_happy_path(
     assert out["agent_response"] == "What labels?"
     assert "platform_constraint" in out
     assert "FROZEN" in out["platform_constraint"]
-    assert "evals_start_evaluator" in out["platform_constraint"]
+    assert "start_evaluator" in out["platform_constraint"]
     assert ctx.request_context.lifespan_context.has_questions is True
     assert ctx.request_context.lifespan_context.committed is False
 
 
 # ── ask_user: gating + decline-fallback ──────────────────────────────────
+
+
+def test_ask_user_question_rejects_single_option() -> None:
+    """AskUserQuestion downstream requires 2-4 options; surface that at the
+    MCP boundary so a 1-option call (e.g. SLM gated out, leaving only LLM)
+    fails with a clear schema error instead of bubbling up from the host."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="at least 2"):
+        AskUserQuestion(
+            question="Only one",
+            options=[AskUserOption(label="LLM", description="Optimized LLM")],
+        )
 
 
 @pytest.mark.asyncio
@@ -550,7 +1125,10 @@ async def test_ask_user_requires_start_evaluator_first(ctx: Any) -> None:
             questions=[
                 AskUserQuestion(
                     question="Pick one",
-                    options=[AskUserOption(label="A", value="a")],
+                    options=[
+                        AskUserOption(label="A", description="a"),
+                        AskUserOption(label="B", description="b"),
+                    ],
                 )
             ]
         ),
@@ -570,8 +1148,8 @@ async def test_ask_user_returns_ask_user_question_payload(ctx: Any) -> None:
                 AskUserQuestion(
                     question="LLM or SLM?",
                     options=[
-                        AskUserOption(label="LLM", value="LLM"),
-                        AskUserOption(label="SLM", value="SLM"),
+                        AskUserOption(label="LLM", description="LLM"),
+                        AskUserOption(label="SLM", description="SLM"),
                     ],
                 )
             ]
@@ -580,6 +1158,13 @@ async def test_ask_user_returns_ask_user_question_payload(ctx: Any) -> None:
     )
     assert out["action"] == "ask_user_question"
     assert "AskUserQuestion" in out["instructions"]
+    # Decline/escape of the host AskUserQuestion must not stall the flow: every
+    # payload reminds the model to treat the "User declined to answer questions"
+    # response (or any interruption) as a skip and fall back to the per-decision
+    # default in the skill/command. See the "Skip handling" section in
+    # skills/evaluator/SKILL.md and commands/eval.md.
+    assert "declined" in out["instructions"].lower()
+    assert "skip" in out["instructions"].lower()
     assert len(out["askUserQuestions"]) == 1
     assert {o["label"] for o in out["askUserQuestions"][0]["options"]} == {"LLM", "SLM"}
     assert ctx.request_context.lifespan_context.has_questions is False
@@ -603,8 +1188,8 @@ async def test_ask_user_allowed_for_slm_llm_step(ctx: Any) -> None:
                 AskUserQuestion(
                     question="LLM or SLM?",
                     options=[
-                        AskUserOption(label="LLM", value="LLM"),
-                        AskUserOption(label="SLM", value="SLM"),
+                        AskUserOption(label="LLM", description="LLM"),
+                        AskUserOption(label="SLM", description="SLM"),
                     ],
                 )
             ]
@@ -620,14 +1205,33 @@ async def test_ask_user_allowed_for_slm_llm_step(ctx: Any) -> None:
 # ── send_message: surfaces url + instruction when initial flow completes ─
 
 
+def _add_plan_response(httpx_mock: Any, *, slm: bool = True, llm: bool = True) -> None:
+    """Mock GET /plan with the requested entitlements."""
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/plan",
+        method="GET",
+        json={
+            "id": "paid" if slm else "free",
+            "name": "Paid" if slm else "Free",
+            "subscription": None,
+            "entitlements": {
+                "llmEndpoints": llm,
+                "slmEndpoints": slm,
+                "threadCountLimit": None,
+            },
+        },
+    )
+
+
 @pytest.mark.asyncio
 async def test_send_message_surfaces_url_when_commit_id_present(
-    langgraph_client: FakeLangGraphClient, ctx: Any
+    httpx_mock: Any, langgraph_client: FakeLangGraphClient, ctx: Any
 ) -> None:
     """Reproduces the post-data-generation step: the agent emits a
     ``commit_id`` in state to mark the synthetic example set as committed.
     The response must surface a thread URL and a follow-up instruction, and
     re-arm has_questions for the next ask_user call."""
+    _add_plan_response(httpx_mock, slm=True)
     langgraph_client.set_state(
         {
             "messages": [
@@ -654,11 +1258,12 @@ async def test_send_message_surfaces_url_when_commit_id_present(
     assert out["url"].endswith("/thread/thread-1")
     assert "instructions" in out
     instructions = out["instructions"]
-    # Must direct the orchestrator to surface the URL and ask SLM vs LLM in
-    # the same turn — no separate review-confirmation gate.
+    # Must direct the orchestrator to surface the URL and ask the model
+    # choice in the same turn — no separate review-confirmation gate. The
+    # gate policy itself lives in the eval skill / command docs, not here.
     assert "review/edit" in instructions
-    assert "evals_ask_user" in instructions
-    assert "SLM" in instructions and "LLM" in instructions
+    assert "ask_user" in instructions
+    assert "UI experience" in instructions
     assert "Ready to optimize" not in instructions
     assert "review-confirm" not in instructions.lower()
     # Frozen-task constraint must be surfaced post-commit, so a user who asks
@@ -666,10 +1271,167 @@ async def test_send_message_surfaces_url_when_commit_id_present(
     # sample-only edit.
     assert "platform_constraint" in out
     assert "FROZEN" in out["platform_constraint"]
-    assert "evals_start_evaluator" in out["platform_constraint"]
+    assert "start_evaluator" in out["platform_constraint"]
     assert state.committed is True
+    # Entitled user: backstop must NOT block subsequent Optimize [SLM].
+    assert state.slm_allowed is True
+    assert out["slm_allowed"] is True
     # Re-armed so the next ask_user (optimization choice) is allowed through.
     assert state.has_questions is True
+
+
+# ── send_message: SLM entitlement gating ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_send_message_post_commit_blocks_slm_when_not_entitled(
+    httpx_mock: Any, langgraph_client: FakeLangGraphClient, ctx: Any
+) -> None:
+    """Free-plan user must NOT be offered SLM. Instructions must surface the
+    upgrade prompt + subscription-billing deep link, present only the LLM
+    option, and the state flag must arm the optimize backstop."""
+    _add_plan_response(httpx_mock, slm=False)
+    langgraph_client.set_state(
+        {
+            "messages": [{"role": "assistant", "content": "Examples ready."}],
+            "commit_id": "commit-abc",
+        }
+    )
+    state = ctx.request_context.lifespan_context
+    state.has_questions = False
+    state.committed = False
+
+    out = await _send_message(SendMessageArgs(thread_id="thread-1", message="answers"), ctx)
+
+    # The structured signal carries the gate; the prose carries the gate
+    # rule for the orchestrator to apply. Instructions describe both options
+    # plus a "drop SLM when slm_allowed=false" directive — the orchestrator
+    # branches on the boolean, not on per-state copy.
+    # The structured signal carries the gate; the rule lives in the eval
+    # skill / command docs. The tool response just publishes slm_allowed
+    # and arms the optimize backstop via state.
+    assert out["slm_allowed"] is False
+    assert state.slm_allowed is False
+
+
+@pytest.mark.asyncio
+async def test_send_message_post_commit_fails_closed_on_plan_error(
+    httpx_mock: Any, langgraph_client: FakeLangGraphClient, ctx: Any
+) -> None:
+    """A 5xx from /plan must fail closed (no SLM), not crash the commit flow."""
+    httpx_mock.add_response(url=f"{PLATFORM_API}/plan", method="GET", status_code=500)
+    langgraph_client.set_state(
+        {
+            "messages": [{"role": "assistant", "content": "Examples ready."}],
+            "commit_id": "commit-abc",
+        }
+    )
+    state = ctx.request_context.lifespan_context
+    state.committed = False
+    state.slm_allowed = True
+
+    out = await _send_message(SendMessageArgs(thread_id="t1", message="ok"), ctx)
+
+    assert out["slm_allowed"] is False
+    assert state.slm_allowed is False
+
+
+@pytest.mark.asyncio
+async def test_send_message_post_commit_propagates_401_from_plan(
+    httpx_mock: Any, langgraph_client: FakeLangGraphClient, ctx: Any
+) -> None:
+    """401 on /plan must propagate so the inline auth flow fires —
+    the fail-closed handler must NOT silently swallow it.
+    """
+    httpx_mock.add_response(url=f"{PLATFORM_API}/plan", method="GET", status_code=401)
+    langgraph_client.set_state(
+        {
+            "messages": [{"role": "assistant", "content": "Examples ready."}],
+            "commit_id": "commit-abc",
+        }
+    )
+    state = ctx.request_context.lifespan_context
+    state.committed = False
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await _send_message(SendMessageArgs(thread_id="t1", message="ok"), ctx)
+
+
+@pytest.mark.asyncio
+async def test_handle_optimize_blocks_slm_when_state_blocked(ctx: Any) -> None:
+    """Backstop: if a free-plan user's orchestrator somehow sends
+    'Optimize [SLM]', the optimize handler must reject with an upgrade-link
+    envelope before kicking off the 20-min background run."""
+    state = ctx.request_context.lifespan_context
+    state.slm_allowed = False
+
+    out = await _send_message(SendMessageArgs(thread_id="thr-1", message="Optimize [SLM]"), ctx)
+
+    assert "error" in out
+    assert "paid Plurai plan" in out["error"]
+    assert "settings?tab=subscription-billing" in out["error"]
+    assert "vibe-training" in out["error"]
+    assert "Optimized LLM option" in out["error"]
+    # The protocol command must not leak into the user-facing error text.
+    assert "Optimize [LLM]" not in out["error"]
+    # Orchestrator routing carries the protocol string.
+    assert "Optimize [LLM]" in out["recovery_hint"]
+
+
+@pytest.mark.asyncio
+async def test_handle_optimize_allows_llm_when_state_blocked(
+    httpx_mock: Any, langgraph_client: FakeLangGraphClient, ctx: Any
+) -> None:
+    """Backstop is SLM-only — Optimize [LLM] must still proceed normally
+    for a free-plan user."""
+    state = ctx.request_context.lifespan_context
+    state.slm_allowed = False
+    langgraph_client.set_frames([_state_event({"classifier_id": "cls-llm"})])
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/cls-llm",
+        method="GET",
+        json={"id": "cls-llm", "slug": "ev", "defaultVersion": {"number": "1.0.0"}},
+    )
+
+    out = await _send_message(SendMessageArgs(thread_id="thr-1", message="Optimize [LLM]"), ctx)
+    await _drain_background(state)
+
+    assert out.get("status") == "optimization_started"
+    assert out.get("classifier_id") == "cls-llm"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_message",
+    [
+        "Optimize [other]",
+        "Optimize [GPT4]",
+        "Optimize [SLM] please",
+        "Optimize[SLM]",
+    ],
+)
+async def test_handle_optimize_rejects_malformed_payload(
+    langgraph_client: FakeLangGraphClient, ctx: Any, bad_message: str
+) -> None:
+    """Format backstop: only literal 'Optimize [LLM]' / 'Optimize [SLM]' are
+    accepted. Anything else (extra text, third payload, missing space) must
+    return an error envelope and MUST NOT start a background run — otherwise
+    the orchestrator could silently fire SLM-tier compute by interpreting an
+    'Other' / declined ask into a malformed message."""
+    state = ctx.request_context.lifespan_context
+    state.slm_allowed = True
+
+    out = await _send_message(SendMessageArgs(thread_id="thr-1", message=bad_message), ctx)
+
+    assert "error" in out
+    assert "Optimize [LLM]" in out["error"]
+    assert "Optimize [SLM]" in out["error"]
+    assert "explicitly pick" in out["error"]
+    # No background run should have been spawned — the orchestrator must re-ask
+    # the user, not silently fire optimization on a misinterpreted answer.
+    assert "thr-1" not in state.optimize_runs
+    # And the FakeLangGraphClient must not have been driven (no run_agent call).
+    assert langgraph_client.runs.calls == []
 
 
 @pytest.mark.asyncio
@@ -697,9 +1459,40 @@ async def test_send_message_no_url_when_no_commit_id(
     # branch must not leak it.
     assert "platform_constraint" not in out
     # Pre-commit branch now carries WHO-answers guidance — pin the contract
-    # by name (evals_ask_user) without freezing the wording.
+    # by name (ask_user) without freezing the wording.
     assert "instructions" in out
-    assert "evals_ask_user" in out["instructions"]
+    assert "ask_user" in out["instructions"]
     assert state.committed is False
     # Refinement question detected → has_questions re-armed via the '?' branch.
     assert state.has_questions is True
+
+
+# ── get_api_key: reuses stored auth key, never creates a second one ──────
+
+
+@pytest.mark.asyncio
+async def test_get_api_key_returns_stored_key(monkeypatch: Any, ctx: Any) -> None:
+    """The integration snippet must embed the SAME key the user configured
+    at session start — `auth login` already stored it on disk. Creating a
+    fresh key on the Plurai backend (the old behaviour) just clutters the
+    user's account; both the REST API and the deployed evaluator endpoint
+    accept the same long-lived key."""
+    monkeypatch.setattr("evals_mcp.tools.classifiers.load_api_key", lambda: "ak_test_xyz")
+
+    out = await _get_api_key(GetApiKeyArgs(), ctx)
+
+    assert out == {"api_key": "ak_test_xyz"}
+
+
+@pytest.mark.asyncio
+async def test_get_api_key_raises_missing_when_no_key_on_disk(monkeypatch: Any, ctx: Any) -> None:
+    """If the credentials file is missing (e.g. user ran `auth logout` mid
+    session), the tool must surface MissingApiKeyError so the standard
+    inline auth prompt fires — not silently emit an empty string into the
+    integration snippet."""
+    from evals_mcp.errors import MissingApiKeyError
+
+    monkeypatch.setattr("evals_mcp.tools.classifiers.load_api_key", lambda: None)
+
+    with pytest.raises(MissingApiKeyError):
+        await _get_api_key(GetApiKeyArgs(), ctx)

@@ -104,24 +104,6 @@ class OptimizationView(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# REST: API keys
-# ---------------------------------------------------------------------------
-
-
-class CreateApiKeyRequest(BaseModel):
-    model_config = _StrictModel
-
-    name: str
-
-
-class CreateApiKeyResponse(BaseModel):
-    model_config = _LooseModel
-
-    id: str
-    secret: str
-
-
-# ---------------------------------------------------------------------------
 # REST: Example-set file uploads
 # ---------------------------------------------------------------------------
 
@@ -147,3 +129,24 @@ class CreateExampleFileResponse(BaseModel):
     id: str | None = None
     file_name: str | None = None
     example_set_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# REST: Subscription plan
+# ---------------------------------------------------------------------------
+
+
+class PlanEntitlements(BaseModel):
+    model_config = _LooseModel
+
+    llm_endpoints: bool = False
+    slm_endpoints: bool = False
+    thread_count_limit: int | None = None
+
+
+class PlanResponse(BaseModel):
+    model_config = _LooseModel
+
+    id: str
+    name: str = ""
+    entitlements: PlanEntitlements = Field(default_factory=PlanEntitlements)

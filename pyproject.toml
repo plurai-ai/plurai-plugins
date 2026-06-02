@@ -61,3 +61,7 @@ reportMissingTypeStubs = false
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = "-m 'not integration'"
+markers = [
+  "integration: opt-in tests that hit a real Pluto API using the user's credentials at ~/.config/evals/credentials.json (run with `uv run pytest -m integration`).",
+]
