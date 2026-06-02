@@ -142,9 +142,25 @@ async def _start_optimize_and_await_classifier(
     """
     existing = state.optimize_runs.get(thread_id)
     if existing is not None:
-        return await _await_optimize_run(existing, thread_id, message, timeout)
+        # A run that terminated with an error *before* a classifier_id ever
+        # surfaced protects no server-side classifier, and the cause may be
+        # transient (5xx) or fixable (the user re-authed after a
+        # MissingApiKeyError). Drop the dead entry so this explicit retry
+        # starts a fresh run instead of replaying the cached error forever —
+        # no retry could ever clear it otherwise. A run that already emitted a
+        # classifier_id is never dropped: that id is the durable handoff, so
+        # we resume it (returning the id) even if the run later failed.
+        if (
+            existing.task.done()
+            and existing.captured_error is not None
+            and existing.captured_id is None
+        ):
+            state.optimize_runs.pop(thread_id, None)
+            state.background_tasks.discard(existing.task)
+        else:
+            return await _await_optimize_run(existing, thread_id, message, timeout)
 
-    run = OptimizeRun(task=cast("asyncio.Task[None]", None), event=asyncio.Event())
+    event = asyncio.Event()
 
     def on_state(snapshot: ThreadStateView) -> None:
         if snapshot.classifier_id and run.captured_id is None:
@@ -172,10 +188,16 @@ async def _start_optimize_and_await_classifier(
             # (legitimate completion or error) doesn't burn the wait budget.
             run.event.set()
 
-    run.task = asyncio.create_task(run_optimize())
+    # Create the task before the record so ``run.task`` is a live Task from
+    # construction — never a placeholder. ``on_state``/``run_optimize`` close
+    # over ``run`` by name (late binding); create_task only *schedules* the
+    # coroutine, so its body first runs at the await below, by which point
+    # ``run`` is already bound.
+    task = asyncio.create_task(run_optimize())
+    run = OptimizeRun(task=task, event=event)
     state.optimize_runs[thread_id] = run
-    state.background_tasks.add(run.task)
-    run.task.add_done_callback(state.background_tasks.discard)
+    state.background_tasks.add(task)
+    task.add_done_callback(state.background_tasks.discard)
 
     return await _await_optimize_run(run, thread_id, message, timeout)
 
@@ -218,7 +240,8 @@ async def _await_optimize_run(
 async def _handle_optimize(
     state: ServerState, settings: Settings, thread_id: str, message: str
 ) -> dict[str, Any]:
-    """Optimize fast-path.
+    """Handle an ``Optimize [LLM]``/``[SLM]`` message: validate, gate, fire
+    the background run, and await the classifier_id.
 
     The classifier is created *during* the agent run, and the SLM run keeps
     the run stream open for the full ~20 min. So
@@ -247,11 +270,15 @@ async def _handle_optimize(
        declined ask into something we don't accept. The Plurai agent would
        silently mishandle it, so we fail loudly here and route the
        orchestrator back to ``ask_user``.
-    2. **Entitlement**: if the org lacks SLM entitlement
-       (``state.slm_allowed`` set to False by the prior commit-time plan
-       check), reject ``Optimize [SLM]`` before starting the background run.
-       The gated UX in ``_send_message`` already omits the SLM option, but
-       this defends against orchestrator drift.
+    2. **Entitlement**: if the org lacks SLM entitlement, reject
+       ``Optimize [SLM]`` before starting the background run.
+       ``state.slm_allowed`` is refreshed from ``GET /plan`` only on the most
+       recent *committed* ``_send_message`` and defaults to True, so this
+       backstop bites only post-commit — an ``Optimize [SLM]`` arriving before
+       any commit (pure orchestrator drift) is not gated here, but that's the
+       same window the gated UX itself hasn't run in. The gated UX in
+       ``_send_message`` is the primary control; this is the post-commit
+       backstop against drift.
     """
     normalized = message.strip().lower()
     if normalized not in ("optimize [slm]", "optimize [llm]"):

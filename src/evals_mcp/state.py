@@ -26,14 +26,19 @@ logger: Any = structlog.get_logger(__name__)
 class OptimizeRun:
     """In-flight or terminal agent optimize run for a thread.
 
+    ``task`` is a live :class:`asyncio.Task` from construction (never a
+    placeholder) — consumers may call ``task.done()`` unconditionally.
     ``event`` is set the moment ``captured_id`` becomes non-None OR the
     background task terminates (success or failure). Resumers wait on it.
 
     Under the one-run-per-thread invariant enforced in
-    :func:`evals_mcp.tools.evaluator._start_optimize_and_await_classifier`,
-    an instance is the durable record of "this thread's optimize already
-    happened" — captured_id (or captured_error) is what every subsequent
-    call sees, never a fresh run.
+    :func:`_start_optimize_and_await_classifier`, an instance is the durable
+    record of "this thread's optimize already happened" — captured_id (or
+    captured_error) is what every subsequent call sees, never a fresh run.
+    The sole exception: a run that terminates with ``captured_error`` set and
+    ``captured_id`` still None (it died before a classifier surfaced) is
+    dropped on the next explicit retry, since it protects no server-side
+    state and the cause may be transient or fixable.
     """
 
     task: asyncio.Task[None]
@@ -60,8 +65,10 @@ class ServerState:
     background_tasks: set[asyncio.Task[None]] = field(default_factory=lambda: set())
     # One entry per thread_id that has ever started an optimize run in this
     # server's lifetime. Looked up first by _start_optimize_and_await_classifier
-    # to enforce one-run-per-thread; never cleaned up while the server lives,
-    # so a resumer arriving after the run finished still sees the captured_id.
+    # to enforce one-run-per-thread; a resumer arriving after the run finished
+    # still sees the captured_id. The only entry ever removed is a run that
+    # died before emitting a classifier_id (dropped on retry so a fresh run can
+    # start); entries that emitted an id persist for the server's lifetime.
     optimize_runs: dict[str, OptimizeRun] = field(default_factory=lambda: dict[str, OptimizeRun]())
 
 

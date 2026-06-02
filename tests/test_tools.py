@@ -18,6 +18,7 @@ from evals_mcp.tools.classifiers import (
     GetApiKeyArgs,
     GetResultsArgs,
     SearchEvaluatorsArgs,
+    _format_search_markdown,
     _get_api_key,
     _get_results,
     _search_evaluators,
@@ -429,43 +430,122 @@ async def test_optimize_resumes_with_captured_id(
 
 
 @pytest.mark.asyncio
-async def test_optimize_replays_captured_error(
-    monkeypatch: Any, langgraph_client: FakeLangGraphClient, ctx: Any
+async def test_optimize_retries_fresh_after_preclassifier_failure(
+    httpx_mock: Any, monkeypatch: Any, langgraph_client: FakeLangGraphClient, ctx: Any
 ) -> None:
-    """An agent run that terminated with an error (e.g. mid-session API key
-    revocation) is the thread's terminal state under the one-run rule. The
-    next call must re-raise the captured error (so format_tool_error fires
-    the inline auth prompt) WITHOUT invoking run_agent a second time."""
+    """A run that dies BEFORE emitting a classifier_id protects no server-side
+    state, so the next explicit retry must DROP the dead entry and start a
+    fresh run — not replay the cached error forever (which no retry could
+    clear, looping the orchestrator on the transient-retry hint). Here the
+    first attempt fails with a missing key; after the user re-authenticates,
+    the retry starts a fresh run and succeeds — recovery that replay-forever
+    made impossible.
+    """
+    from evals_mcp.clients import ThreadStateView
     from evals_mcp.errors import MissingApiKeyError
 
     state = ctx.request_context.lifespan_context
     _ = langgraph_client
 
     call_count = 0
+    key_present = False
 
-    async def failing_run_agent(thread_id: str, message: str, *, on_state: Any = None) -> None:
+    async def run_agent(thread_id: str, message: str, *, on_state: Any = None) -> None:
         nonlocal call_count
         call_count += 1
-        raise MissingApiKeyError()
+        if not key_present:
+            raise MissingApiKeyError()
+        if on_state is not None:
+            on_state(ThreadStateView(classifier_id="cls-recovered", commit_id=None, messages=[]))
 
-    monkeypatch.setattr(state.agent, "run_agent", failing_run_agent)
+    monkeypatch.setattr(state.agent, "run_agent", run_agent)
     monkeypatch.setattr(get_settings(), "classifier_wait_timeout_s", 30.0)
 
+    # First attempt: no key → surface MissingApiKeyError so the inline auth
+    # flow can fire.
     with pytest.raises(MissingApiKeyError):
         await _send_message(
             SendMessageArgs(thread_id="thr-err", message="Optimize [LLM]"),
             ctx,
         )
     await _drain_background(state)
+    assert call_count == 1
+    # The dead entry persists until the retry that drops it.
+    assert state.optimize_runs["thr-err"].captured_error is not None
+    assert state.optimize_runs["thr-err"].captured_id is None
 
-    # Second call on the same thread: must re-raise without re-running.
-    with pytest.raises(MissingApiKeyError):
-        await _send_message(
-            SendMessageArgs(thread_id="thr-err", message="Optimize [LLM]"),
-            ctx,
-        )
+    # User re-authenticates; the retry must start a FRESH run, not replay.
+    key_present = True
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/cls-recovered",
+        method="GET",
+        json={"id": "cls-recovered", "slug": "ev", "defaultVersion": {"number": "1.0.0"}},
+    )
+    out = await _send_message(
+        SendMessageArgs(thread_id="thr-err", message="Optimize [LLM]"),
+        ctx,
+    )
+    await _drain_background(state)
 
-    assert call_count == 1, "captured error replays without re-running"
+    assert out["status"] == "optimization_started"
+    assert out["classifier_id"] == "cls-recovered"
+    assert call_count == 2, "a dead pre-classifier run is retried fresh, not replayed"
+
+
+@pytest.mark.asyncio
+async def test_optimize_isolates_concurrent_runs_across_threads(
+    httpx_mock: Any, monkeypatch: Any, langgraph_client: FakeLangGraphClient, ctx: Any
+) -> None:
+    """The 'several optimizers running' scenario: two threads optimizing at
+    once must each get their OWN OptimizeRun. While thr-a's run is still in
+    flight, thr-b's classifier_id must surface independently — neither run's
+    captured_id may leak into the other. Guards the per-thread keying against
+    a regression to a shared/singleton run record.
+    """
+    from evals_mcp.clients import ThreadStateView
+
+    state = ctx.request_context.lifespan_context
+    _ = langgraph_client
+
+    release_a = asyncio.Event()
+
+    async def run_agent(thread_id: str, message: str, *, on_state: Any = None) -> None:
+        if thread_id == "thr-a":
+            await release_a.wait()  # stay in flight for the duration of the test
+            return
+        if on_state is not None:
+            on_state(ThreadStateView(classifier_id="cls-b", commit_id=None, messages=[]))
+
+    monkeypatch.setattr(state.agent, "run_agent", run_agent)
+    monkeypatch.setattr(get_settings(), "classifier_wait_timeout_s", 0.05)
+
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/cls-b",
+        method="GET",
+        json={"id": "cls-b", "slug": "b-eval", "defaultVersion": {"number": "1.0.0"}},
+    )
+
+    # thr-a kicks off and stays in flight — its id never surfaces within budget.
+    out_a = await _send_message(SendMessageArgs(thread_id="thr-a", message="Optimize [LLM]"), ctx)
+    assert "error" in out_a
+    assert "still running in the background" in out_a["error"]
+
+    # thr-b optimizes concurrently and resolves to ITS OWN classifier_id while
+    # thr-a's background run is still open.
+    out_b = await _send_message(SendMessageArgs(thread_id="thr-b", message="Optimize [LLM]"), ctx)
+    assert out_b["status"] == "optimization_started"
+    assert out_b["classifier_id"] == "cls-b"
+
+    # Two independent records; thr-a's in-flight run is untouched by thr-b.
+    run_a = state.optimize_runs["thr-a"]
+    run_b = state.optimize_runs["thr-b"]
+    assert run_a is not run_b
+    assert run_a.captured_id is None
+    assert not run_a.task.done()
+    assert run_b.captured_id == "cls-b"
+
+    release_a.set()
+    await _drain_background(state)
 
 
 @pytest.mark.asyncio
@@ -799,6 +879,63 @@ async def test_search_evaluators_json_format(httpx_mock: Any, ctx: Any) -> None:
     assert payload["evaluators"][0]["has_optimization"] is False
 
 
+@pytest.mark.asyncio
+async def test_search_evaluators_degrades_when_a_probe_fails(httpx_mock: Any, ctx: Any) -> None:
+    """One classifier's optimization probe failing (post-retry 5xx) must NOT
+    collapse the entire listing. The failed row degrades to
+    has_optimization=None ('unknown'); every other row still renders."""
+    items = [
+        {"id": "ok", "slug": "ok-slug", "defaultVersion": {"number": "1.0.0"}},
+        {"id": "boom", "slug": "boom-slug", "defaultVersion": {"number": "1.0.0"}},
+    ]
+    httpx_mock.add_response(url=f"{PLATFORM_API}/classifiers", method="GET", json={"items": items})
+    # "ok": both probes 404 → not optimized.
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/ok/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/ok-slug/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+    # "boom": first probe 500 → raises (fixture has max_retries=0), probe fails.
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/boom/versions/1.0.0/optimization",
+        method="GET",
+        status_code=500,
+    )
+
+    payload = await _search_evaluators(
+        SearchEvaluatorsArgs(limit=25, offset=0, response_format="json"), ctx
+    )
+    assert isinstance(payload, dict)
+    # The whole listing survived — both rows present, not a single error envelope.
+    assert payload["count"] == 2
+    # Page order is preserved: row 0 is "ok" (probed cleanly), row 1 is "boom".
+    assert payload["evaluators"][0]["has_optimization"] is False
+    assert payload["evaluators"][1]["has_optimization"] is None  # unknown, not silently "no"
+
+
+def test_format_search_markdown_marks_unknown_probe() -> None:
+    """A probe that failed renders as 'unknown (probe failed)', never as '—'
+    (which would read as 'definitely not optimized')."""
+    row: dict[str, Any] = {
+        "id": "x",
+        "name": "X",
+        "slug": "x",
+        "labels": [],
+        "endpoint_url": "u",
+        "has_optimization": None,
+    }
+    assert "unknown" in _format_search_markdown([row], 1, 0)
+    row["has_optimization"] = False
+    assert "unknown" not in _format_search_markdown([row], 1, 0)
+    row["has_optimization"] = True
+    assert "optimized" in _format_search_markdown([row], 1, 0)
+
+
 # ── get_results: 404-on-both falls through to empty metrics ──────────────
 
 
@@ -825,6 +962,94 @@ async def test_get_results_returns_empty_metrics_when_no_optimization(
     assert isinstance(out, dict)
     assert out["baseline"] == {"accuracy": None, "precision": None, "recall": None}
     assert out["optimized"] == {"accuracy": None, "precision": None, "recall": None}
+
+
+async def _terminal_optimize_run(captured_id: str, error: BaseException | None) -> Any:
+    """Build a DONE OptimizeRun for direct insertion into state.optimize_runs."""
+    from evals_mcp.state import OptimizeRun
+
+    async def _noop() -> None:
+        return
+
+    task = asyncio.create_task(_noop())
+    await task  # ensure terminal before the lookup reads task.done()
+    return OptimizeRun(
+        task=task, event=asyncio.Event(), captured_id=captured_id, captured_error=error
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_results_surfaces_dead_background_run(httpx_mock: Any, ctx: Any) -> None:
+    """A background optimize that emitted classifier_id and then DIED (the
+    stream stays open ~20 min after the id surfaces) leaves the platform with
+    no results. Polling get_results must surface the captured cause as a
+    terminal failure — not loop forever on 'still running' while the error
+    sits unread in the OptimizeRun ledger."""
+    state = ctx.request_context.lifespan_context
+    state.optimize_runs["thr-dead"] = await _terminal_optimize_run(
+        "cls-dead", RuntimeError("background boom")
+    )
+
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/cls-dead",
+        method="GET",
+        json={"slug": "s-dead", "defaultVersion": {"number": "1.0.0"}},
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/cls-dead/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/s-dead/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+
+    out = await _get_results(GetResultsArgs(classifier_id="cls-dead", response_format="json"), ctx)
+    assert isinstance(out, dict)
+    assert "error" in out
+    assert "failed in the background" in out["error"]
+    assert "background boom" in out["error"]  # the captured cause is surfaced
+    assert out["classifier_id"] == "cls-dead"
+    assert out["thread_id"] == "thr-dead"
+    assert "recovery_hint" in out
+    # Must NOT tell the orchestrator to keep polling.
+    assert "still running" not in json.dumps(out)
+
+
+@pytest.mark.asyncio
+async def test_get_results_stays_pending_when_run_alive_but_metrics_lag(
+    httpx_mock: Any, ctx: Any
+) -> None:
+    """Guard against over-triggering the terminal-failure path: a run that
+    finished CLEANLY (captured_id set, NO captured_error) while the platform
+    is still computing metrics must still report 'still running' — not a
+    spurious failure."""
+    state = ctx.request_context.lifespan_context
+    state.optimize_runs["thr-ok"] = await _terminal_optimize_run("cls-ok", None)
+
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/cls-ok",
+        method="GET",
+        json={"slug": "s-ok", "defaultVersion": {"number": "1.0.0"}},
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/cls-ok/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+    httpx_mock.add_response(
+        url=f"{PLATFORM_API}/classifiers/s-ok/versions/1.0.0/optimization",
+        method="GET",
+        status_code=404,
+    )
+
+    out = await _get_results(GetResultsArgs(classifier_id="cls-ok", response_format="json"), ctx)
+    assert isinstance(out, dict)
+    assert "error" not in out
+    assert "still running" in out["instructions"]
+    assert "failed in the background" not in json.dumps(out)
 
 
 @pytest.mark.asyncio

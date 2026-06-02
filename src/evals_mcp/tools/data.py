@@ -4,15 +4,30 @@ from __future__ import annotations
 
 from typing import Annotated, Any, cast
 
+import httpx
+import structlog
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..clients import CreateExampleFileRequest, ExampleRecordInput
 from ..errors import format_tool_error
 from ..state import ServerState
 
+logger: Any = structlog.get_logger(__name__)
+
 _StrictModel = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+# Concrete exception classes ``format_tool_error`` renders; catching this
+# tuple rather than bare ``Exception`` lets a real bug surface as a traceback
+# instead of a disguised "Plurai request failed" envelope.
+_TOOL_ERRORS = (
+    httpx.HTTPStatusError,
+    httpx.TransportError,
+    RuntimeError,
+    ValidationError,
+    ValueError,
+)
 
 
 class UploadRecord(BaseModel):
@@ -64,7 +79,8 @@ def register(mcp: FastMCP) -> None:
         )
         try:
             await state.platform.upload_example_file(args.example_set_id, request, timeout=60.0)
-        except Exception as e:
+        except _TOOL_ERRORS as e:
+            logger.exception("upload_data failed")
             return format_tool_error(e)
         return {"status": "uploaded", "count": len(args.records), "source": args.source}
 

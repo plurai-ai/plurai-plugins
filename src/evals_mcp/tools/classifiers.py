@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 from typing import Annotated, Any, Literal, cast
 
+import httpx
+import structlog
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..auth import load_api_key
 from ..clients import (
@@ -16,12 +18,27 @@ from ..clients import (
     MetricsView,
     OptimizationView,
 )
-from ..config import get_settings
+from ..config import Settings, get_settings
 from ..errors import MissingApiKeyError, format_tool_error
-from ..state import ServerState
+from ..state import OptimizeRun, ServerState
+
+logger: Any = structlog.get_logger(__name__)
 
 _StrictModel = ConfigDict(extra="forbid", str_strip_whitespace=True)
 ResponseFormat = Literal["json", "markdown"]
+
+# Shared by every read-tool wrapper: the concrete exception classes
+# ``format_tool_error`` knows how to render. Catching this tuple (rather than
+# bare ``Exception``) lets a genuine programming bug — KeyError, TypeError —
+# propagate as a real traceback instead of being disguised as a "Plurai
+# request failed" envelope with no stack logged.
+_TOOL_ERRORS = (
+    httpx.HTTPStatusError,
+    httpx.TransportError,
+    RuntimeError,
+    ValidationError,
+    ValueError,
+)
 
 
 # ── Input models ──────────────────────────────────────────────────────────
@@ -92,6 +109,49 @@ async def _fetch_optimization(
     return None
 
 
+def _find_dead_optimize_run(
+    state: ServerState, classifier_id: str
+) -> tuple[str, OptimizeRun] | None:
+    """Return the (thread_id, run) of a background optimize that emitted this
+    ``classifier_id`` and then died, if any.
+
+    ``classifier_id`` surfaces early in the run, but the stream stays open for
+    the full optimization (~20 min for SLM). If the background task dies in
+    that window the platform never produces results, so polling get_results
+    would otherwise report "still running" forever while the captured cause
+    sits unread. This lets get_results surface it as terminal instead.
+
+    Only same-process runs are visible — the in-memory ledger is empty after a
+    server restart, in which case the platform 404 is the only signal and the
+    caller falls back to the (unbounded) pending message.
+    """
+    for thread_id, run in state.optimize_runs.items():
+        if run.captured_id == classifier_id and run.task.done() and run.captured_error is not None:
+            return thread_id, run
+    return None
+
+
+def _optimize_failed_envelope(
+    settings: Settings, thread_id: str, classifier_id: str, error: BaseException | None
+) -> dict[str, Any]:
+    cause = format_tool_error(error)["error"] if error is not None else "unknown error"
+    return {
+        "error": (
+            f"Optimization for classifier {classifier_id} failed in the "
+            f"background and produced no results: {cause}. This run cannot be "
+            "resumed — start a new evaluator to retry. "
+            f"Check {settings.api_base.rstrip('/')}/thread/{thread_id}."
+        ),
+        "classifier_id": classifier_id,
+        "thread_id": thread_id,
+        "recovery_hint": (
+            "Do NOT keep polling get_results — the background run is dead and "
+            "will never produce results. Surface the failure to the user and "
+            "offer to start a new evaluator via start_evaluator."
+        ),
+    }
+
+
 def _labels_of(c: ClassifierSummaryView) -> list[str]:
     properties = c.output_schema.get("properties", {})
     if not isinstance(properties, dict):
@@ -119,7 +179,8 @@ def _format_search_markdown(results: list[dict[str, Any]], total: int, offset: i
     ]
     for r in results:
         labels = ", ".join(r["labels"]) if r["labels"] else "—"
-        opt = "✅ optimized" if r["has_optimization"] else "—"
+        has = r["has_optimization"]
+        opt = "✅ optimized" if has else ("⚠️ unknown (probe failed)" if has is None else "—")
         lines.extend(
             [
                 f"### {r['name'] or r['slug']}",
@@ -173,15 +234,27 @@ async def _search_evaluators(args: SearchEvaluatorsArgs, ctx: Context[Any, Any, 
     items = listing.items
     page = items[args.offset : args.offset + args.limit]
 
-    async def _probe(c: ClassifierSummaryView) -> tuple[ClassifierSummaryView, str, bool]:
+    async def _probe(c: ClassifierSummaryView) -> bool:
         version = c.default_version.number if c.default_version else "1.0.0"
-        has_opt = await _has_optimization(state, c.id, c.slug, version)
-        return c, version, has_opt
+        return await _has_optimization(state, c.id, c.slug, version)
 
-    probed = await asyncio.gather(*(_probe(c) for c in page))
+    # return_exceptions=True: one classifier's optimization probe failing
+    # (post-retry 5xx, transport drop) must NOT collapse the whole listing.
+    # Degrade that row to has_optimization=None ("unknown") and keep going.
+    probed = await asyncio.gather(*(_probe(c) for c in page), return_exceptions=True)
 
     results: list[dict[str, Any]] = []
-    for c, version, has_opt in probed:
+    for c, probe in zip(page, probed, strict=True):
+        version = c.default_version.number if c.default_version else "1.0.0"
+        if isinstance(probe, BaseException):
+            logger.warning(
+                "optimization probe failed; rendering row as unknown",
+                classifier_id=c.id,
+                error=repr(probe),
+            )
+            has_opt: bool | None = None
+        else:
+            has_opt = probe
         slug = c.slug
         results.append(
             {
@@ -236,14 +309,24 @@ async def _get_results(args: GetResultsArgs, ctx: Context[Any, Any, Any]) -> Any
     baseline = opt.baseline if opt else MetricsView()
     optimized = opt.optimized if opt else MetricsView()
 
+    pending = optimized.accuracy is None
+
+    # No platform results yet: before telling the orchestrator to keep polling,
+    # check whether the background run that emitted this classifier_id has
+    # already died. If so it will never produce results — surface the captured
+    # cause as terminal instead of an unbounded "still running" loop.
+    if pending:
+        dead = _find_dead_optimize_run(state, classifier_id)
+        if dead is not None:
+            thread_id, run = dead
+            return _optimize_failed_envelope(settings, thread_id, classifier_id, run.captured_error)
+
     # Arm the ask_user gate once optimization is fully done — the next step
     # is asking the user which language to emit the integration snippet in.
     # While results are still pending, leave the gate alone so the model is
     # forced to re-schedule a wake-up rather than ask premature questions.
-    if optimized.accuracy is not None:
+    if not pending:
         state.has_questions = True
-
-    pending = optimized.accuracy is None
     payload: dict[str, Any] = {
         "classifier_id": classifier_id,
         "slug": slug,
@@ -307,16 +390,17 @@ def register(mcp: FastMCP) -> None:
     async def search_evaluators(args: SearchEvaluatorsArgs, ctx: Context[Any, Any, Any]) -> Any:
         try:
             return await _search_evaluators(args, ctx)
-        except Exception as e:
+        except _TOOL_ERRORS as e:
+            logger.exception("search_evaluators failed")
             return format_tool_error(e)
 
     @mcp.tool(
         name="get_results",
         description=(
             "Fetch optimization results (accuracy, precision, recall) and endpoint URL. "
-            "Pass classifier_id from the prior Optimize response. Returns null "
-            "baseline/optimized while optimization is still running — schedule another "
-            "wake-up and call again rather than asking the user."
+            "Pass classifier_id from the prior Optimize response. While optimization is "
+            "still running the metric fields (optimized.accuracy etc.) are null — "
+            "schedule another wake-up and call again rather than asking the user."
         ),
         annotations=ToolAnnotations(
             readOnlyHint=True,
@@ -328,7 +412,8 @@ def register(mcp: FastMCP) -> None:
     async def get_results(args: GetResultsArgs, ctx: Context[Any, Any, Any]) -> Any:
         try:
             return await _get_results(args, ctx)
-        except Exception as e:
+        except _TOOL_ERRORS as e:
+            logger.exception("get_results failed")
             return format_tool_error(e)
 
     @mcp.tool(
@@ -349,7 +434,8 @@ def register(mcp: FastMCP) -> None:
     async def get_api_key(args: GetApiKeyArgs, ctx: Context[Any, Any, Any]) -> dict[str, Any]:
         try:
             return await _get_api_key(args, ctx)
-        except Exception as e:
+        except _TOOL_ERRORS as e:
+            logger.exception("get_api_key failed")
             return format_tool_error(e)
 
     _ = (search_evaluators, get_results, get_api_key)
