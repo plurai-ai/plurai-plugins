@@ -125,8 +125,7 @@ def test_send_message_error_envelope_carries_thread_id_and_retry_hint() -> None:
     recovery_hint that explicitly steers the orchestrator away from
     start_evaluator. Without these, the orchestrator's default
     fallback is to restart from the top — which creates a new thread and
-    re-fires the whole tool flow (the reported "shoots all tools again"
-    symptom)."""
+    re-fires the whole tool flow."""
     request = httpx.Request("POST", "https://run.plurai.ai/threads/x/runs/stream")
     response = httpx.Response(500, content=b"backend boom", request=request)
     err = httpx.HTTPStatusError("e", request=request, response=response)
@@ -337,8 +336,7 @@ async def test_optimize_runs_at_most_once_per_thread(
     yet' envelope (common under batch load) is to retry with the same
     Optimize message. The server MUST treat that retry as a resume of the
     existing background run, not a kick that starts a second run_agent —
-    parallel ReAct loops on the same thread are what previously caused the
-    generate_samples / manipulate_data tool storm on the agent side.
+    that would create parallel background runs on the same thread.
     """
     state = ctx.request_context.lifespan_context
     _ = langgraph_client  # fixture activates the fake SDK client
@@ -364,7 +362,7 @@ async def test_optimize_runs_at_most_once_per_thread(
 
     assert call_count == 1, (
         "run_agent must fire at most once per thread — retries resume the "
-        "existing run instead of starting parallel ReAct loops."
+        "existing run instead of starting parallel background runs."
     )
 
     # Release the hanging task so background drain can complete.

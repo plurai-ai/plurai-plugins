@@ -133,8 +133,8 @@ async def _start_optimize_and_await_classifier(
 
     Idempotency: subsequent calls with the same ``thread_id`` resume the
     existing ``OptimizeRun`` instead of starting a second agent run — that
-    re-fire is what would otherwise cause two parallel ReAct loops on the
-    same thread (the symptom reported when batch optimizes time out and the
+    re-fire is what would otherwise cause two parallel background runs on the
+    same thread (which can happen when batch optimizes time out and the
     orchestrator retries). Returns the classifier_id once captured, or
     ``None`` if it hasn't surfaced yet (timeout) or if the agent run ended
     without ever emitting one (degenerate). A ``captured_error`` on the
