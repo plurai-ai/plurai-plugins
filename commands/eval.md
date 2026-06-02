@@ -22,7 +22,7 @@ Call `search_evaluators` first as an optimization to check whether the user alre
 
 If creating new, call `start_evaluator`.
 
-For `task_description`: 1-2 short sentences. Include the core task and desired label names if the user mentioned them. Do NOT include examples, detailed criteria, or long explanations.
+For `task_description`: 1-2 short sentences. Include the core task and desired label names **only if the user already mentioned them** — do NOT pre-ask the user for labels, scope, or criteria before this call (the agent's refinement round covers all of those, and pre-asking causes the user to see the labels question twice). Do NOT include examples, detailed criteria, or long explanations.
 
 **Platform constraint — the task definition is frozen.** The `task_description` passed to `start_evaluator` is permanent for that evaluator. Subsequent `send_message` calls only refine the *generated samples* (add/remove/edit examples), never the task itself (judging criteria, scope). Labels CAN still be changed within the same task. If at any point — including after the user sees the samples — they want to change the underlying task, you MUST tell them the task can't be edited, confirm they want to restart, then call `start_evaluator` again with a revised `task_description`. Do NOT try to amend the task via `send_message`; it will silently leave the underlying task wrong while mutating samples.
 
