@@ -10,7 +10,7 @@ Create fine-tuned LLM-as-a-judge evaluators on the [Plurai platform](https://plu
 
 ## 1. Get your API key
 
-Do this first. After creating your free [Plurai account](https://app.plurai.ai), go to https://app.plurai.ai/settings?tab=api-keys , create an API key, and keep it handy — you'll paste it into the console the first time you run the plugin. Your API key is stored locally on your machine (`~/.config/evals/credentials.json`) and sent only to Plurai's API to authenticate your requests — never to Anthropic or any third party.
+After creating your free [Plurai account](https://app.plurai.ai), go to https://app.plurai.ai/settings?tab=api-keys , create an API key, and keep it handy — you'll paste it into the console the first time you run the plugin. Your API key is stored locally on your machine (`~/.config/evals/credentials.json`) and sent only to Plurai's API to authenticate your requests.
 
 ## 2. Install
 
@@ -64,7 +64,3 @@ The MCP server didn't start. Check that:
 ### Requests hang or fail with "Network error reaching Plurai"
 
 If you're behind a corporate proxy or firewall, allowlist the hosts the plugin needs to reach: `app.plurai.ai`, `api.plurai.ai`, and `run.plurai.ai`.
-
-### Reporting a bug
-
-Stderr is discarded for stdio MCP servers, so the server log is the place to look: `~/.cache/evals-mcp/server.log`.
