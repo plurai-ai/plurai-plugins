@@ -59,7 +59,7 @@ If an API key is missing, expired, or invalid, the plugin tells you so inline an
 The MCP server didn't start. Check that:
 
 - You reloaded after installing — run `/reload-plugins`, or Restart in the IDE.
-- [`uv`](https://docs.astral.sh/uv/) is installed and on your `PATH`, and you have **Python 3.11+**. The server launches via `uv run … python -m evals_mcp`; if `uv` isn't found it fails silently.
+- [`uv`](https://docs.astral.sh/uv/) is installed and on your `PATH`, and you have **Python 3.11+**. The plugin needs `uv` to start its server; if it isn't found, the tools fail to load silently.
 
 ### Requests hang or fail with "Network error reaching Plurai"
 
