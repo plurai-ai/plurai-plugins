@@ -1,6 +1,6 @@
 # Evals — Claude Code Plugin
 
-Create fine-tuned LLM-as-a-judge evaluators on the [Plurai platform](https://plurai.ai), directly from Claude Code. Describe what you want to evaluate, optionally answer a few refinement questions, and the plugin returns a deployed HTTPS endpoint you can call from your application.
+Create fine-tuned LLM-as-a-judge evaluators on the [Plurai platform](https://app.plurai.ai/claude), directly from Claude Code. Describe what you want to evaluate, optionally answer a few refinement questions, and the plugin returns a deployed HTTPS endpoint you can call from your application.
 
 Training a small language model (SLM) is optional but recommended: for the best results — distill it into a dedicated SLM judge. The SLM runs with much lower latency and cost than a general-purpose model, stays sharply specialized to your task, and keeps improving as you refine and redeploy it, making it practical and affordable to run on every production request at scale.
 
@@ -12,7 +12,7 @@ Training a small language model (SLM) is optional but recommended: for the best 
 
 ## 1. Get your API key
 
-After creating your free [Plurai account](https://app.plurai.ai), go to https://app.plurai.ai/settings?tab=api-keys , create an API key, and keep it handy — you'll paste it into the console the first time you run the plugin. Your API key is stored locally on your machine (`~/.config/evals/credentials.json`) and sent only to Plurai's API to authenticate your requests.
+Create your free [Plurai account](https://app.plurai.ai/claude) by signing in. After sign-in, create an API key (the 3rd step on the setup list page), and keep it handy — you'll paste it into the console the first time you run the plugin. Your API key is stored locally on your machine (`~/.config/evals/credentials.json`) and sent only to Plurai's API to authenticate your requests.
 
 ## 2. Install
 
@@ -54,7 +54,9 @@ The plugin will:
 
 ## Troubleshooting
 
-If an API key is missing, expired, or invalid, the plugin tells you so inline and links you to where to generate a new one — just follow the prompt. The items below cover problems the plugin can't report on its own.
+### API key is missing
+
+If an API key is missing, expired, or invalid, the plugin tells you so inline and links you to where to generate [a new one](https://app.plurai.ai/claude). Paste the API key in the Claude console.
 
 ### `/evals:eval` or the tools don't appear
 
