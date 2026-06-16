@@ -2,6 +2,8 @@
 
 Create fine-tuned LLM-as-a-judge evaluators on the [Plurai platform](https://plurai.ai), directly from Claude Code. Describe what you want to evaluate, answer a few refinement questions, and the plugin returns a deployed HTTPS endpoint you can call from your application.
 
+Training a small language model (SLM) is optional but recommended: for the best results — distill it into a dedicated SLM judge. The SLM runs with much lower latency and cost than a general-purpose model, stays sharply specialized to your task, and keeps improving as you refine and redeploy it, making it practical and affordable to run on every production request at scale.
+
 ## Requirements
 
 - [Claude Code](https://docs.claude.com/claude-code)
