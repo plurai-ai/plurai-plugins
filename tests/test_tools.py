@@ -1161,8 +1161,8 @@ async def test_ask_user_returns_ask_user_question_payload(ctx: Any) -> None:
     # Decline/escape of the host AskUserQuestion must not stall the flow: every
     # payload reminds the model to treat the "User declined to answer questions"
     # response (or any interruption) as a skip and fall back to the per-decision
-    # default in the skill/command. See the "Skip handling" section in
-    # skills/evaluator/SKILL.md and commands/eval.md.
+    # default in the skill. See the "Skip handling" section in
+    # skills/eval/SKILL.md.
     assert "declined" in out["instructions"].lower()
     assert "skip" in out["instructions"].lower()
     assert len(out["askUserQuestions"]) == 1
