@@ -289,7 +289,7 @@ async def _handle_optimize(
                 "literal). The user must explicitly pick a model via the "
                 "Model Choice ask_user — never invent a payload from "
                 "an 'Other' / declined answer. Re-ask via ask_user "
-                "with the two model options per the eval skill / command docs."
+                "with the two model options per the eval skill docs."
             )
         }
     if normalized == "optimize [slm]" and not state.slm_allowed:
@@ -527,7 +527,7 @@ async def _ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str,
             " IF this is the model-choice question: after the user picks, call "
             "send_message ONCE with EXACTLY 'Optimize [LLM]' or "
             "'Optimize [SLM]' (hardcoded — do not modify). On Other / decline / "
-            "ambiguity, follow the Other policy in the eval skill / command — "
+            "ambiguity, follow the Other policy in the eval skill — "
             "never fire optimization without an explicit user pick."
         )
     return {
@@ -538,7 +538,7 @@ async def _ask_user(args: AskUserArgs, ctx: Context[Any, Any, Any]) -> dict[str,
             + extra
             + " If AskUserQuestion returns 'User declined to answer questions' (or is "
             "otherwise cancelled/interrupted/escaped), treat it as a SKIP and follow "
-            "the default action documented in your skill or command for this specific "
+            "the default action documented in your skill for this specific "
             "decision point. Do NOT retry the same ask, do NOT re-call ask_user "
             "with the same questions, do NOT surface a 'tool interrupted' or 'user "
             "declined' message verbatim to the user, and do NOT stall the flow."
