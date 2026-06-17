@@ -1161,8 +1161,8 @@ async def test_ask_user_returns_ask_user_question_payload(ctx: Any) -> None:
     # Decline/escape of the host AskUserQuestion must not stall the flow: every
     # payload reminds the model to treat the "User declined to answer questions"
     # response (or any interruption) as a skip and fall back to the per-decision
-    # default in the skill/command. See the "Skip handling" section in
-    # skills/evaluator/SKILL.md and commands/eval.md.
+    # default in the skill. See the "Skip handling" section in
+    # skills/eval/SKILL.md.
     assert "declined" in out["instructions"].lower()
     assert "skip" in out["instructions"].lower()
     assert len(out["askUserQuestions"]) == 1
@@ -1260,7 +1260,7 @@ async def test_send_message_surfaces_url_when_commit_id_present(
     instructions = out["instructions"]
     # Must direct the orchestrator to surface the URL and ask the model
     # choice in the same turn — no separate review-confirmation gate. The
-    # gate policy itself lives in the eval skill / command docs, not here.
+    # gate policy itself lives in the eval skill docs, not here.
     assert "review/edit" in instructions
     assert "ask_user" in instructions
     assert "UI experience" in instructions
@@ -1308,7 +1308,7 @@ async def test_send_message_post_commit_blocks_slm_when_not_entitled(
     # plus a "drop SLM when slm_allowed=false" directive — the orchestrator
     # branches on the boolean, not on per-state copy.
     # The structured signal carries the gate; the rule lives in the eval
-    # skill / command docs. The tool response just publishes slm_allowed
+    # skill docs. The tool response just publishes slm_allowed
     # and arms the optimize backstop via state.
     assert out["slm_allowed"] is False
     assert state.slm_allowed is False

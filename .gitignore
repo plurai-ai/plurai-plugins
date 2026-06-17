@@ -3,3 +3,7 @@ __pycache__/
 *.log
 .DS_Store
 scripts/
+.omc/
+CLAUDE.md
+.claude/
+.vscode/

@@ -343,7 +343,7 @@ async def _get_results(args: GetResultsArgs, ctx: Context[Any, Any, Any]) -> Any
             else (
                 "Results landed. Surface baseline vs optimized metrics to "
                 "the user, then proceed to the integration-language step "
-                "per the eval skill/command."
+                "per the eval skill."
             )
         ),
     }
