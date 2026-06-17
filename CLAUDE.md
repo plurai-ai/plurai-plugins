@@ -1,10 +1,9 @@
 # Evals — Claude Code Plugin
 
-A Claude Code plugin (`evals` in the `plurai-plugins` marketplace) that ships <commands / skills / an MCP server> for creating evaluator agents on the Plurai platform.
+A Claude Code plugin (`evals` in the `plurai-plugins` marketplace) that ships skills and an MCP server for creating evaluator agents on the Plurai platform.
 
 ## Repo layout
 - `.claude-plugin/plugin.json` — manifest (bump `version` for releases)
-- `commands/` — slash commands shipped to users (one .md per command)
 - `skills/<name>/SKILL.md` — skills shipped to users (frontmatter required)
 - `src/<pkg>/` — Python MCP server (FastMCP, registered via `.mcp.json`)
 - `evals/` — MCP tool evaluations (realistic multi-step questions)
@@ -41,18 +40,18 @@ A Claude Code plugin (`evals` in the `plurai-plugins` marketplace) that ships <c
 - Default response format Markdown; accept `response_format: "json" | "markdown"` for data-heavy tools
 - Always paginate list endpoints
 
-### Slash commands (in `commands/`)
-- Filename = command name (`commands/foo.md` → `/<plugin>:foo`)
-- Frontmatter: `description`, `argument-hint`
-- Use gerund forms in skill names (`git-pushing`, not `git-push`)
-
 ### Skills (in `skills/<name>/SKILL.md`)
-- Frontmatter `description` is critical — it's what triggers activation
+- This plugin ships skills only — no `commands/` folder. Skills are both
+  slash-invocable (`skills/<name>/SKILL.md` → `/<plugin>:<name>`) and
+  auto-activated, so they fully replace standalone commands.
+- Frontmatter `description` is critical — it's what triggers auto-activation;
+  add `argument-hint` for skills meant to be invoked with `/<plugin>:<name> <args>`
 - Process steps go in `SKILL.md`; reference material in `skills/<name>/reference/*.md`
 - Don't dump background context into `SKILL.md` — keep it procedural
 
 ## Release checklist
-1. Bump `version` in `.claude-plugin/plugin.json`
+1. Bump `version` in `.claude-plugin/plugin.json` **and** keep the matching
+   `plugins[].version` in `.claude-plugin/marketplace.json` in sync
 2. Run `uv run pytest && uv run python evals/run.py`
 3. Update `README.md` and `CHANGELOG.md`
 4. Tag and push; marketplace consumers pull from the tag
