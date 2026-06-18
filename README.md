@@ -13,6 +13,7 @@ The resulting SLM runs in real time at sub-100ms, with up to 93% lower latency, 
 ## Quickstart
 
 **1\. Get your API key.** Create a free [Plurai account](https://app.plurai.ai/claude?step=guide), generate a key, and paste it into the Claude console on first run. Your key is stored locally (`~/.config/evals/credentials.json`) and used only to authenticate with Plurai's API.
+
 **2\. Install** — run these one at a time in any Claude Code session:
 
 ```
