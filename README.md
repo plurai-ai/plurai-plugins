@@ -1,8 +1,8 @@
 # Evals & Guardrails SLMs — Claude Code Plugin
 
-Turn a simple task description (or a few examples) into a deployed SLM for online **evals** or **guardrails**. You write a description; it handles data generation, labeling, fine-tuning, and serving, returning a live HTTPS endpoint in minutes.
+Turn a simple task description (or a few examples) into a deployed SLM for online **evals** or **guardrails**, directly from Claude Code. You write a description; it handles data generation, labeling, fine-tuning, and serving, returning a live HTTPS endpoint in minutes.
 
-The result runs in real time at sub-100ms, with up to 93% lower latency, 43% lower failure rate, and 87% cost savings versus frontier LLM judges. Backed by our ICML 2026 research paper, [BARRED](https://arxiv.org/abs/2604.25203).
+The resulting SLM runs in real time at sub-100ms, with up to 93% lower latency, 43% lower failure rate, and 87% cost savings versus frontier LLM judges. Backed by our ICML 2026 research paper, [BARRED](https://arxiv.org/abs/2604.25203).
 
 ## Requirements
 
