@@ -1,24 +1,20 @@
-# Evals — Claude Code Plugin
+# Evals & Guardrails SLMs — Claude Code Plugin
 
-Create fine-tuned LLM-as-a-judge evaluators on the [Plurai platform](https://app.plurai.ai/claude), directly from Claude Code. Describe what you want to evaluate, optionally answer a few refinement questions, and the plugin returns a deployed HTTPS endpoint you can call from your application.
+Turn a simple task description (or a few examples) into a deployed SLM for online **evals** or **guardrails**, directly from Claude Code. You write a description; it handles data generation, labeling, fine-tuning, and serving, returning a live HTTPS endpoint in minutes.
 
-Training a small language model (SLM) is optional but recommended: for the best results — distill it into a dedicated SLM judge. The SLM runs with much lower latency and cost than a general-purpose model, stays sharply specialized to your task, and keeps improving as you refine and redeploy it, making it practical and affordable to run on every production request at scale.
+The resulting SLM runs in real time at sub-100ms, with up to 93% lower latency, 43% lower failure rate, and 87% cost savings versus frontier LLM judges. Backed by our ICML 2026 research paper, [BARRED](https://arxiv.org/abs/2604.25203).
 
 ## Requirements
 
-- [Claude Code](https://docs.claude.com/claude-code)
-- Python 3.11+ and [uv](https://docs.astral.sh/uv/)
-- A free [Plurai account](https://app.plurai.ai)
+- Claude Code  
+- Python 3.11+ with [`uv`](https://docs.astral.sh/uv/) on your `PATH`  
+- A free [Plurai account](https://app.plurai.ai/claude?step=guide)
 
-## 1. Get your API key
+## Quickstart
 
-Create your free [Plurai account](https://app.plurai.ai/claude) by signing in. After sign-in, create an API key (the 3rd step on the setup list page), and keep it handy — you'll paste it into the console the first time you run the plugin. Your API key is stored locally on your machine (`~/.config/evals/credentials.json`) and sent only to Plurai's API to authenticate your requests.
+**1\. Get your API key.** Create a free [Plurai account](https://app.plurai.ai/claude?step=guide), generate a key, and paste it into the Claude console on first run. Your key is stored locally (`~/.config/evals/credentials.json`) and used only to authenticate with Plurai's API.
 
-## 2. Install
-
-### Claude Code CLI
-
-In any Claude Code session:
+**2\. Install** — run these one at a time in any Claude Code session:
 
 ```
 /plugin marketplace add plurai-ai/plurai-plugins
@@ -32,39 +28,18 @@ In any Claude Code session:
 /reload-plugins
 ```
 
-### IDE (VS Code / JetBrains)
+VS Code / JetBrains: run `/plugins`, add `plurai-ai/plurai-plugins` in the Marketplace tab, install the evals plugin, then Restart.
 
-1. Run `/plugins`.
-2. In the **Marketplace** tab, add `plurai-ai/plurai-plugins`.
-3. In the **Plugins** tab, install the **evals** plugin.
-4. Hit **Restart**.
-
-## 3. Use it
+**3\. Run it.**
 
 ```
-/evals:eval I need to evaluate whether my RAG responses are grounded in the retrieved context
+/evals:eval Evaluate whether my RAG responses are grounded in the retrieved context
 ```
 
-The plugin will:
-
-1. **Create an evaluator** on the Plurai platform from your description.
-2. **Optionally ask refinement questions** through an interactive UI to clarify what "good" looks like — answer them to fine-tune the evaluator, or skip ahead.
-3. **Optimize the evaluator** (LLM- or SLM-based, depending on the task).
-4. **Return a deployed HTTPS endpoint** that you can call from your application using your existing Plurai API key — the same one you configured above. No second key is created.
+The plugin optionally asks refinement questions to sharpen what "good" looks like, fine-tunes an SLM-based eval or guardrail tailored to your use case, and returns an endpoint you call with the same API key.
 
 ## Troubleshooting
 
-### API key is missing
-
-If an API key is missing, expired, or invalid, the plugin tells you so inline and links you to where to generate [a new one](https://app.plurai.ai/claude). Paste the API key in the Claude console.
-
-### `/evals:eval` or the tools don't appear
-
-The MCP server didn't start. Check that:
-
-- You reloaded after installing — run `/reload-plugins`, or Restart in the IDE.
-- [`uv`](https://docs.astral.sh/uv/) is installed and on your `PATH`, and you have **Python 3.11+**. The plugin needs `uv` to start its server; if it isn't found, the tools fail to load silently.
-
-### Requests hang or fail with "Network error reaching Plurai"
-
-If you're behind a corporate proxy or firewall, allowlist the hosts the plugin needs to reach: `app.plurai.ai`, `api.plurai.ai`, and `run.plurai.ai`.
+- **API key invalid or missing** — the plugin links you to generate a new one; paste it into the console.  
+- **`/evals:eval` doesn't appear** — the MCP server didn't start. Reload (`/reload-plugins` or Restart), and confirm `uv` is on your `PATH` with Python 3.11+. Without `uv`, the tools fail to load silently.  
+- **Requests hang / "Network error reaching Plurai"** — allowlist `app.plurai.ai`, `api.plurai.ai`, `run.plurai.ai`.
