@@ -10,6 +10,14 @@
             "source": "./",
             "description": "Create fine-tuned LLM-as-a-judge evaluators on the Plurai platform",
             "version": "0.4.0"
+        },
+        {
+            "name": "plurai-simulation",
+            "source": {
+                "source": "github",
+                "repo": "plurai-ai/plurai-simulation"
+            },
+            "description": "Set up Plurai simulation for any AI agent."
         }
     ]
 }
