@@ -14,8 +14,8 @@
         {
             "name": "plurai-simulation",
             "source": {
-                "source": "github",
-                "repo": "plurai-ai/plurai-simulation"
+                "source": "url",
+                "url": "https://github.com/plurai-ai/plurai-simulation.git"
             },
             "description": "Set up Plurai simulation for any AI agent."
         }
